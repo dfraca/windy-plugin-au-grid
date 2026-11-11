@@ -2,12 +2,12 @@ import type { ExternalPluginConfig } from '@windy/interfaces';
 
 const config: ExternalPluginConfig = {
     name: 'windy-plugin-au-grid',
-    version: '0.1.0',
+    version: '0.1.1',
     icon: '⚡',
     title: 'Australian Power Grid',
     description:
-        'Transmission lines by voltage, substations and generators across Australia, ' +
-        'with live generation and interconnector flows for the NEM and WEM.',
+        'Australian power lines coloured by voltage, with substations and power stations. ' +
+        'Tap anything for details.',
     author: 'dfraca',
     repository: 'https://github.com/dfraca/windy-plugin-au-grid',
     desktopUI: 'rhpane',

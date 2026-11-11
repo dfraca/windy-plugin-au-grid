@@ -1,4 +1,4 @@
-import { GA_SERVICE } from './config';
+import { GA_SERVICE, SNAPSHOT_URLS } from './config';
 import type { Props } from './util';
 
 export interface Feature {
@@ -13,6 +13,8 @@ export interface GaData {
     substations: Feature[];
     stations: Feature[];
     warnings: string[];
+    /** Date (YYYY-MM-DD) the data was copied from GA, when loaded from the repo snapshot. */
+    snapshotDate: string | null;
 }
 
 const PAGE_SIZE = 2000;
@@ -120,21 +122,64 @@ async function fetchLayer(
     return out;
 }
 
+/** The pre-built copy of the data in this plugin's GitHub repo: one request, served compressed. */
+async function loadSnapshot(): Promise<GaData> {
+    let lastError: Error = new Error('no snapshot address configured');
+    for (const url of SNAPSHOT_URLS) {
+        try {
+            const res = await fetch(url);
+            if (!res.ok) {
+                throw new Error(`HTTP ${res.status}`);
+            }
+            const json = await res.json();
+            if (!Array.isArray(json.lines) || !json.lines.length || !Array.isArray(json.stations)) {
+                throw new Error('snapshot is empty');
+            }
+            return {
+                lines: json.lines,
+                substations: Array.isArray(json.substations) ? json.substations : [],
+                stations: json.stations,
+                warnings: [],
+                snapshotDate: json.meta?.fetched ?? null,
+            };
+        } catch (e) {
+            lastError = e as Error;
+        }
+    }
+    throw lastError;
+}
+
+async function loadFromService(): Promise<GaData> {
+    const warnings: string[] = [];
+    const ids = await discoverLayers();
+    const [lines, substations, stations] = await Promise.all([
+        // ~50 m tolerance: invisible at grid scale, much lighter to draw.
+        fetchLayer(ids.lines, 0.0005, warnings, 'Lines'),
+        fetchLayer(ids.substations, null, warnings, 'Substations'),
+        fetchLayer(ids.stations, null, warnings, 'Power stations'),
+    ]);
+    return { lines, substations, stations, warnings, snapshotDate: null };
+}
+
 let cache: Promise<GaData> | null = null;
 
-/** Loads all three layers once per page load; reopening the plugin reuses the result. */
+/** Loads the grid once per page load; reopening the plugin reuses the result. */
 export function loadGaData(): Promise<GaData> {
     if (!cache) {
         cache = (async () => {
-            const warnings: string[] = [];
-            const ids = await discoverLayers();
-            const [lines, substations, stations] = await Promise.all([
-                // ~50 m tolerance: invisible at grid scale, much lighter to draw.
-                fetchLayer(ids.lines, 0.0005, warnings, 'Lines'),
-                fetchLayer(ids.substations, null, warnings, 'Substations'),
-                fetchLayer(ids.stations, null, warnings, 'Power stations'),
-            ]);
-            return { lines, substations, stations, warnings };
+            try {
+                return await loadSnapshot();
+            } catch (snapshotError) {
+                try {
+                    return await loadFromService();
+                } catch (serviceError) {
+                    throw new Error(
+                        `the data snapshot (${(snapshotError as Error).message}) and the ` +
+                            `Geoscience Australia service (${(serviceError as Error).message}) ` +
+                            `were both unreachable`,
+                    );
+                }
+            }
         })();
         cache.catch(() => {
             cache = null;

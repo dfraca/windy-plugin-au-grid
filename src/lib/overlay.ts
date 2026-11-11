@@ -1,12 +1,14 @@
 import {
     CORRIDORS,
     FUEL_STYLES,
+    MAJOR_SUBSTATION_MIN_ZOOM,
     NEM_REGIONS,
     SUBSTATION_MIN_ZOOM,
     VOLTAGE_BY_ID,
     VOLTAGE_STYLES,
     classifyVoltage,
     fuelGroup,
+    hvdcLinkName,
 } from './config';
 import type { FuelGroup, VoltageClass } from './config';
 import type { Feature, GaData } from './ga';
@@ -15,14 +17,13 @@ import { distanceKm, esc, fmtMW, num, popupHtml, prop, propsRows, row, swatch } 
 
 export type LayerId = 'lines' | 'substations' | 'generators' | 'flows';
 
-const GA_CREDIT = 'Source: Geoscience Australia, National Electricity Infrastructure';
+const GA_CREDIT = 'Source: Geoscience Australia, Electricity Infrastructure';
+const NAME_FIELDS = ['FEATURE_NAME', 'NAME'];
 const OE_CREDIT = 'Live data: Open Electricity (AEMO dispatch, 5-minute)';
 
 function lineText(f: Feature): string {
     const p = f.properties;
-    return ['NAME', 'CLASS', 'DESCRIPTION', 'COMMENT_', 'COMMENT']
-        .map(k => String(prop(p, k) ?? ''))
-        .join(' ');
+    return ['FEATURE_NAME', 'NAME', 'CLASS'].map(k => String(prop(p, k) ?? '')).join(' ');
 }
 
 function lineKv(f: Feature): number | null {
@@ -30,7 +31,7 @@ function lineKv(f: Feature): number | null {
 }
 
 function isOperational(f: Feature): boolean {
-    const status = String(prop(f?.properties, 'OPERATIONALSTATUS', 'OPERATIONAL_STATUS', 'STATUS') ?? '');
+    const status = String(prop(f?.properties, 'STATUS', 'OPERATIONALSTATUS', 'OPERATIONAL_STATUS') ?? '');
     return status === '' || /^operational/i.test(status.trim());
 }
 
@@ -63,7 +64,7 @@ export class GridOverlay {
     private map: any;
 
     private lineLayers = new Map<VoltageClass, any[]>();
-    private substationLayer: any = null;
+    private substationLayers: { layer: any; minZoom: number }[] = [];
     private generatorLayer: any = null;
     private flowLayer: any = null;
     private popup: any = null;
@@ -207,7 +208,9 @@ export class GridOverlay {
                 this.toggle(layer, show);
             }
         }
-        this.toggle(this.substationLayer, this.layerOn.substations && zoom >= SUBSTATION_MIN_ZOOM);
+        for (const s of this.substationLayers) {
+            this.toggle(s.layer, this.layerOn.substations && zoom >= s.minZoom);
+        }
         this.toggle(this.generatorLayer, this.layerOn.generators);
         this.toggle(this.flowLayer, this.layerOn.flows);
     }
@@ -242,8 +245,10 @@ export class GridOverlay {
     destroy(): void {
         this.lineLayers.forEach(layers => layers.forEach(l => this.removeLayer(l)));
         this.lineLayers.clear();
-        [this.substationLayer, this.generatorLayer, this.flowLayer].forEach(l => this.removeLayer(l));
-        this.substationLayer = this.generatorLayer = this.flowLayer = null;
+        this.substationLayers.forEach(s => this.removeLayer(s.layer));
+        this.substationLayers = [];
+        [this.generatorLayer, this.flowLayer].forEach(l => this.removeLayer(l));
+        this.generatorLayer = this.flowLayer = null;
         try {
             this.popup?.remove?.();
         } catch (e) {
@@ -308,12 +313,13 @@ export class GridOverlay {
     }
 
     private buildSubstations(): void {
-        this.removeLayer(this.substationLayer);
-        this.substationLayer = null;
+        this.substationLayers.forEach(s => this.removeLayer(s.layer));
+        this.substationLayers = [];
         if (!this.ga) {
             return;
         }
-        const group = new this.L.FeatureGroup();
+        const major = new this.L.FeatureGroup();
+        const minor = new this.L.FeatureGroup();
         for (const f of this.ga.substations) {
             const at = pointLatLng(f);
             if (!at) {
@@ -321,29 +327,39 @@ export class GridOverlay {
             }
             const kv = num(prop(f.properties, 'VOLTAGEKV', 'CAPACITYKV', 'VOLTAGE_KV', 'VOLTAGE'));
             const cls = classifyVoltage(kv);
+            const isMajor = kv !== null && kv >= 200;
+            const live = isOperational(f);
             const marker = new this.L.CircleMarker(at, {
                 bubblingMouseEvents: false,
-                radius: 3.5,
+                radius: isMajor ? 4.5 : 3.5,
                 color: kv ? VOLTAGE_BY_ID[cls].color : '#333',
-                weight: 1.5,
+                weight: isMajor ? 2 : 1.5,
+                opacity: live ? 1 : 0.5,
                 fillColor: '#ffffff',
-                fillOpacity: 1,
+                fillOpacity: live ? 1 : 0.5,
             });
             this.onClick(marker, latlng => {
                 this.openFacilityCode = null;
+                const subtype = String(prop(f.properties, 'FEATURE_SUBTYPE') ?? '');
+                const kind = subtype && subtype !== 'Substation' ? `${subtype} substation` : 'Substation';
                 this.openPopup(
                     latlng,
                     popupHtml(
-                        String(prop(f.properties, 'NAME') ?? 'Substation'),
-                        'Substation',
-                        propsRows(f.properties, ['NAME']),
+                        String(prop(f.properties, ...NAME_FIELDS) ?? 'Substation'),
+                        swatch(kv ? VOLTAGE_BY_ID[cls].color : '#fff') +
+                            esc([kind, kv ? `${kv} kV` : ''].filter(Boolean).join(' · ')) +
+                            this.statusNote(f),
+                        propsRows(f.properties, [...NAME_FIELDS, 'FEATURE_SUBTYPE']),
                         GA_CREDIT,
                     ),
                 );
             });
-            group.addLayer(marker);
+            (isMajor ? major : minor).addLayer(marker);
         }
-        this.substationLayer = group;
+        this.substationLayers = [
+            { layer: minor, minZoom: SUBSTATION_MIN_ZOOM },
+            { layer: major, minZoom: MAJOR_SUBSTATION_MIN_ZOOM },
+        ];
     }
 
     /** GA stations not already covered by an Open Electricity facility at the same site. */
@@ -373,10 +389,15 @@ export class GridOverlay {
                 continue;
             }
             const p = f.properties;
-            const fuel = fuelGroup(
-                `${prop(p, 'PRIMARYFUELTYPE') ?? ''} ${prop(p, 'GENERATIONTYPE') ?? ''}`,
+            // Fuel fields first; GA's technology name only when those say nothing useful ("Fossil").
+            let fuel = fuelGroup(
+                `${prop(p, 'PRIMARY_FUEL_TYPE_DESCRIPTOR') ?? ''} ` +
+                    `${prop(p, 'PRIMARY_FUEL_TYPE', 'PRIMARYFUELTYPE') ?? ''}`,
             );
-            const mw = num(prop(p, 'GENERATIONMW', 'CAPACITYMW', 'CAPACITY_MW'));
+            if (fuel === 'other') {
+                fuel = fuelGroup(String(prop(p, 'TECHNOLOGY_TYPE', 'GENERATIONTYPE') ?? ''));
+            }
+            const mw = num(prop(p, 'GENERATION_CAPACITY_MW', 'GENERATIONMW', 'CAPACITY_MW'));
             const marker = new this.L.CircleMarker(at, {
                 bubblingMouseEvents: false,
                 radius: capacityRadius(mw),
@@ -391,10 +412,11 @@ export class GridOverlay {
                 this.openPopup(
                     latlng,
                     popupHtml(
-                        String(prop(p, 'NAME') ?? 'Power station'),
+                        String(prop(p, ...NAME_FIELDS) ?? 'Power station'),
                         `${swatch(FUEL_STYLES[fuel].color)}${esc(FUEL_STYLES[fuel].label)}` +
-                            (mw ? ` · ${esc(fmtMW(mw))}` : ''),
-                        propsRows(p, ['NAME']),
+                            (mw ? ` · ${esc(fmtMW(mw))}` : '') +
+                            this.statusNote(f),
+                        propsRows(p, NAME_FIELDS),
                         GA_CREDIT,
                     ),
                 );
@@ -438,13 +460,31 @@ export class GridOverlay {
     private lineHtml(f: Feature, cls: VoltageClass): string {
         const kv = lineKv(f);
         const style = VOLTAGE_BY_ID[cls];
+        const link = hvdcLinkName(kv, lineText(f));
+        const headline =
+            cls === 'hvdc'
+                ? `HVDC link${link && link !== 'HVDC' ? ` (${link})` : ''}`
+                : kv
+                  ? `${kv} kV`
+                  : style.label;
+        const subtype = String(prop(f.properties, 'FEATURE_SUBTYPE') ?? '').toLowerCase();
         return popupHtml(
-            String(prop(f.properties, 'NAME') ?? 'Transmission line'),
-            `${swatch(style.color)}${esc(cls === 'hvdc' ? 'HVDC link' : kv ? `${kv} kV` : style.label)}` +
-                (isOperational(f) ? '' : ' · not operational'),
-            propsRows(f.properties, ['NAME']),
+            String(prop(f.properties, ...NAME_FIELDS) ?? 'Power line'),
+            `${swatch(style.color)}${esc(headline)}` +
+                (subtype ? ` · ${esc(subtype)}` : '') +
+                this.statusNote(f),
+            // For DC links the listed kV is GA's nominal figure, so it stays in the table.
+            propsRows(f.properties, [...NAME_FIELDS, 'FEATURE_SUBTYPE']),
             GA_CREDIT,
         );
+    }
+
+    /** " · under construction" and the like, for anything that is not operational. */
+    private statusNote(f: Feature): string {
+        if (isOperational(f)) {
+            return '';
+        }
+        return ` · ${esc(String(prop(f.properties, 'STATUS') ?? 'not operational').toLowerCase())}`;
     }
 
     private facilityFuel(f: OeFacility): FuelGroup {

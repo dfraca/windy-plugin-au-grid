@@ -1,6 +1,22 @@
-/** Geoscience Australia: National Electricity Infrastructure (lines, substations, power stations). */
+/** Geoscience Australia: Electricity Infrastructure (power lines, substations, power stations). */
 export const GA_SERVICE =
-    'https://services.ga.gov.au/gis/rest/services/National_Electricity_Infrastructure/MapServer';
+    'https://services.ga.gov.au/gis/rest/services/Electricity_Infrastructure/MapServer';
+
+/**
+ * Snapshot of the GA layers kept in this plugin's GitHub repo (see scripts/fetch-grid-data.mjs).
+ * One compressed download instead of several paged queries; the live service is the fallback.
+ */
+export const SNAPSHOT_URLS = [
+    'https://raw.githubusercontent.com/dfraca/windy-plugin-au-grid/main/data/grid.json',
+    'https://cdn.jsdelivr.net/gh/dfraca/windy-plugin-au-grid@main/data/grid.json',
+];
+
+/**
+ * Live generation and flows are switched off: api.openelectricity.org.au rejects cross-origin
+ * requests from windy.com ("Disallowed CORS origin"), so a browser plugin cannot call it
+ * directly. Turning this on needs a relay that fetches the data server-side.
+ */
+export const LIVE_DATA_ENABLED = false;
 
 /** Open Electricity (formerly OpenNEM) API: live generation and flows for the NEM and WEM. */
 export const OE_BASE = 'https://api.openelectricity.org.au/v4';
@@ -31,11 +47,30 @@ export const VOLTAGE_BY_ID: Record<VoltageClass, VoltageStyle> = Object.fromEntr
     VOLTAGE_STYLES.map(s => [s.id, s]),
 ) as Record<VoltageClass, VoltageStyle>;
 
-/** Names of the DC links, used because the source data has no AC/DC attribute. */
-const HVDC_PATTERN = /basslink|murraylink|directlink|terranora|marinus|hvdc|\bdc (link|cable|line)\b/i;
+/**
+ * The source data has no AC/DC attribute, so the DC links are picked out by how GA names them:
+ * Basslink is "Basslink-Loy Yang to Basslink-George Town" (the only 400 kV feature), Murraylink
+ * is "Monash to Red Cliffs Terminal" and Directlink is "Mullumbimby to Bungalora".
+ */
+const HVDC_LINKS: { name: string; pattern: RegExp }[] = [
+    { name: 'Basslink', pattern: /basslink-.*basslink-/i },
+    { name: 'Murraylink', pattern: /murraylink|monash to red cliffs|red cliffs( terminal)? to monash/i },
+    { name: 'Directlink', pattern: /directlink|mullumbimby to bungalora|bungalora to mullumbimby/i },
+    { name: 'Marinus Link', pattern: /marinus/i },
+    { name: 'HVDC', pattern: /hvdc/i },
+];
+
+/** Name of the DC link a line belongs to, or null for ordinary AC lines. */
+export function hvdcLinkName(kv: number | null, text = ''): string | null {
+    const hit = HVDC_LINKS.find(l => l.pattern.test(text));
+    if (hit) {
+        return hit.name;
+    }
+    return kv === 400 ? 'Basslink' : null;
+}
 
 export function classifyVoltage(kv: number | null, text = ''): VoltageClass {
-    if (HVDC_PATTERN.test(text)) {
+    if (hvdcLinkName(kv, text)) {
         return 'hvdc';
     }
     if (kv === null || !isFinite(kv) || kv <= 0) {
@@ -59,6 +94,8 @@ export function classifyVoltage(kv: number | null, text = ''): VoltageClass {
     return 'other';
 }
 
+/** Substations at 220 kV and above show from this zoom; the rest from SUBSTATION_MIN_ZOOM. */
+export const MAJOR_SUBSTATION_MIN_ZOOM = 6;
 export const SUBSTATION_MIN_ZOOM = 8;
 
 export type FuelGroup =
@@ -84,16 +121,23 @@ export const FUEL_STYLES: Record<FuelGroup, { label: string; color: string }> = 
     other: { label: 'Other', color: '#bdbdbd' },
 };
 
-/** Works for both Open Electricity fueltech ids ("gas_ocgt") and GA fuel names ("Natural Gas"). */
+/**
+ * Works for Open Electricity fueltech ids ("gas_ocgt"), GA fuel names ("Natural Gas - Coal Seam
+ * Gas") and, as a last resort, GA technology names ("Turbine - Ocgt").
+ */
 export function fuelGroup(text: string | null | undefined): FuelGroup {
-    const t = (text ?? '').toLowerCase();
-    if (!t) {
+    const t = (text ?? '').toLowerCase().replace(/_/g, ' ');
+    if (!t.trim()) {
         return 'other';
     }
     if (/battery/.test(t)) {
         return 'battery';
     }
-    if (/coal seam|methane|gas/.test(t) && !/biogas|landfill|sewage/.test(t)) {
+    // \bgas\b, not "gas": "bagasse" is a biomass fuel.
+    if (
+        /\bgas\b|coal seam|methane|ocgt|ccgt|spark ignition/.test(t) &&
+        !/biogas|landfill|sewage/.test(t)
+    ) {
         return 'gas';
     }
     if (/coal/.test(t)) {
@@ -111,7 +155,7 @@ export function fuelGroup(text: string | null | undefined): FuelGroup {
     if (/bio|waste|wood|bagasse|landfill|sewage/.test(t)) {
         return 'bioenergy';
     }
-    if (/diesel|distillate|oil|kerosene/.test(t)) {
+    if (/diesel|distillate|\boil\b|kerosene|compression ignition/.test(t)) {
         return 'distillate';
     }
     return 'other';

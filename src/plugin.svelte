@@ -16,13 +16,15 @@
                     {chip.label}
                 </button>
             {/each}
-            <button
-                class="chip live"
-                class:off={!showLivePanel}
-                on:click={() => (showLivePanel = !showLivePanel)}
-            >
-                Live data
-            </button>
+            {#if LIVE_DATA_ENABLED}
+                <button
+                    class="chip live"
+                    class:off={!showLivePanel}
+                    on:click={() => (showLivePanel = !showLivePanel)}
+                >
+                    Live data
+                </button>
+            {/if}
             <span class="sep"></span>
             {#each legend as item}
                 <button
@@ -41,7 +43,7 @@
                 </span>
             {/each}
         </div>
-        {#if showLivePanel}
+        {#if LIVE_DATA_ENABLED && showLivePanel}
             <div class="keyrow">
                 <input
                     class="key"
@@ -113,8 +115,9 @@
                 </span>
             {/each}
         </div>
-        <p class="hint">Circle size shows capacity. A green ring means generating now.</p>
+        <p class="hint">Circle size shows capacity.</p>
 
+        {#if LIVE_DATA_ENABLED}
         <h4>Live data</h4>
         {#if !connected}
             <p class="hint">
@@ -152,10 +155,12 @@
         {#if liveMessage}
             <p class="status" class:error={liveIsError}>{liveMessage}</p>
         {/if}
+        {/if}
 
         <p class="credit">
-            Network: © Commonwealth of Australia (Geoscience Australia). Live data: Open
-            Electricity, from AEMO dispatch data (CC BY-NC 4.0). Not for operational use.
+            Network data: © Commonwealth of Australia (Geoscience Australia), CC BY 4.0{snapshotDate
+                ? `, copied ${snapshotDate}`
+                : ''}. Locations are indicative. Not for operational use.
         </p>
     </section>
 {/if}
@@ -167,7 +172,7 @@
     import { onDestroy, onMount } from 'svelte';
 
     import config from './pluginConfig';
-    import { FUEL_STYLES, VOLTAGE_STYLES } from './lib/config';
+    import { FUEL_STYLES, LIVE_DATA_ENABLED, VOLTAGE_STYLES } from './lib/config';
     import { loadGaData } from './lib/ga';
     import {
         deriveCorridorFlows,
@@ -189,18 +194,23 @@
 
     // Highest voltage first in the legend.
     const legend = [...VOLTAGE_STYLES].reverse();
-    const fuels = Object.values(FUEL_STYLES);
-    const layerChips: { id: LayerId; label: string; long: string }[] = [
-        { id: 'lines', label: 'Lines', long: 'Transmission lines' },
+    // Battery only appears in the live (Open Electricity) generator list.
+    const fuels = Object.entries(FUEL_STYLES)
+        .filter(([id]) => LIVE_DATA_ENABLED || id !== 'battery')
+        .map(([, style]) => style);
+    const allLayerChips: { id: LayerId; label: string; long: string }[] = [
+        { id: 'lines', label: 'Lines', long: 'Power lines' },
         { id: 'substations', label: 'Substations', long: 'Substations' },
-        { id: 'generators', label: 'Generators', long: 'Generators' },
+        { id: 'generators', label: 'Generators', long: 'Power stations' },
         { id: 'flows', label: 'Flows', long: 'Live flows between regions' },
     ];
+    const layerChips = allLayerChips.filter(c => LIVE_DATA_ENABLED || c.id !== 'flows');
 
     let overlay: GridOverlay | null = null;
-    let status = 'Loading the grid from Geoscience Australia…';
+    let status = 'Loading the grid…';
     let statusIsError = false;
     let warnings: string[] = [];
+    let snapshotDate: string | null = null;
 
     let show: Record<LayerId, boolean> = {
         lines: true,
@@ -270,7 +280,7 @@
         if (!c) {
             return '';
         }
-        return `${c.lines} lines · ${c.substations} substations · ${c.generators} generators. Tap anything for details.`;
+        return `${c.lines} lines · ${c.substations} substations · ${c.generators} power stations. Tap anything for details.`;
     }
 
     async function loadGrid(): Promise<void> {
@@ -281,10 +291,11 @@
             }
             overlay.setGaData(data);
             warnings = data.warnings;
+            snapshotDate = data.snapshotDate;
             status = describeCounts();
             statusIsError = false;
         } catch (e) {
-            status = `Could not load the grid: ${(e as Error).message}`;
+            status = `Could not load the grid: ${(e as Error).message}.`;
             statusIsError = true;
         }
     }
@@ -394,6 +405,19 @@
         }
     }
 
+    /** If the map is looking somewhere else in the world, bring Australia into view. */
+    function showAustralia(): void {
+        try {
+            const c = map.getCenter();
+            const inAustralia = c.lat > -45 && c.lat < -9 && c.lng > 110 && c.lng < 156;
+            if (!inAustralia) {
+                map.setView([-28, 134], 4);
+            }
+        } catch (e) {
+            // Leave the view alone if the map does not answer.
+        }
+    }
+
     function applyAutoRefresh(): void {
         if (timer) {
             clearInterval(timer);
@@ -424,7 +448,8 @@
         };
         map.on('zoomend', onZoom);
 
-        apiKey = readStoredKey();
+        showAustralia();
+        apiKey = LIVE_DATA_ENABLED ? readStoredKey() : '';
         void loadGrid().then(() => {
             if (apiKey && !destroyed) {
                 void connectLive();

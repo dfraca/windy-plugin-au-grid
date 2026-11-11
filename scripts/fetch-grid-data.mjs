@@ -13,7 +13,7 @@ const OUT_DIR = process.env.GRID_OUT_DIR || 'data';
 const PAGE_SIZE = 2000;
 const MAX_PAGES = 30;
 const DROP_FIELDS =
-    /^(objectid|fid|shape.*|ga_guid|globalid|featuretype|st_length.*|se_anno.*|created_date|last_edited_on|supplied_feature_edits)$/i;
+    /^(objectid|fid|shape.*|ga_guid|globalid|featuretype|feature_type|feature_description|latitude|longitude|st_length.*|se_anno.*|created_date|last_edited_on|supplied_feature_edits)$/i;
 
 async function getJson(url, attempt = 1) {
     try {
@@ -138,11 +138,6 @@ const substations = await fetchLayer(ids.substations, null);
 const stations = await fetchLayer(ids.stations, null);
 
 describe('Lines', lines);
-const dc = lines.filter(f =>
-    /basslink|murraylink|directlink|terranora|marinus|hvdc|\bdc\b|direct current/i.test(JSON.stringify(f.properties)),
-);
-console.log(`  possible HVDC matches: ${dc.length}`);
-for (const f of dc.slice(0, 40)) console.log(`    ${JSON.stringify(f.properties)}`.slice(0, 400));
 describe('Substations', substations);
 describe('Power stations', stations);
 

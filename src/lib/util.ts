@@ -40,7 +40,8 @@ export function fmtMW(value: number | null | undefined): string {
     return `${value.toFixed(abs >= 100 ? 0 : 1)} MW`;
 }
 
-const HIDDEN_FIELDS = /^(objectid|fid|shape.*|ga_guid|globalid|featuretype|st_length.*|se_anno.*)$/i;
+const HIDDEN_FIELDS =
+    /^(objectid|fid|shape.*|ga_guid|globalid|featuretype|feature_type|feature_description|latitude|longitude|st_length.*|se_anno.*)$/i;
 
 function fmtValue(key: string, value: unknown): string {
     if (typeof value === 'number' && value > 1e11 && /revis|date|updated|created/i.test(key)) {
@@ -55,15 +56,19 @@ function fmtValue(key: string, value: unknown): string {
 function fmtKey(key: string): string {
     const k = key.replace(/_+$/, '').replace(/_/g, ' ').toLowerCase();
     const pretty: Record<string, string> = {
-        capacitykv: 'Voltage (kV)',
-        voltagekv: 'Voltage (kV)',
-        operationalstatus: 'Status',
-        generationmw: 'Capacity (MW)',
-        generationtype: 'Generation type',
-        primaryfueltype: 'Primary fuel',
-        primarysubfueltype: 'Fuel detail',
-        generatornumber: 'Generating units',
-        spatialconfidence: 'Location confidence (1–5)',
+        'capacity kv': 'Voltage (kV)',
+        'voltage kv': 'Voltage (kV)',
+        'feature subtype': 'Type',
+        'generation capacity mw': 'Capacity (MW)',
+        'primary fuel type': 'Fuel',
+        'primary fuel type descriptor': 'Fuel detail',
+        'technology type': 'Technology',
+        'number of units': 'Generating units',
+        'feature source': 'Location source',
+        'feature source date': 'Location source date',
+        'attribute source': 'Attribute source',
+        'attribute source date': 'Attribute source date',
+        'spatial confidence': 'Location confidence (1–5)',
     };
     return pretty[k] ?? k.charAt(0).toUpperCase() + k.slice(1);
 }

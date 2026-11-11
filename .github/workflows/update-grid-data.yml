@@ -12,14 +12,6 @@ jobs:
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v7
-            - name: Cross-origin check (informational)
-              run: |
-                  U='https://services.ga.gov.au/gis/rest/services/Electricity_Infrastructure/MapServer?f=json'
-                  echo "== GA service, plain curl =="
-                  curl -sS -m 60 -D - -o /dev/null "$U" | tr -d '\r' | head -12 || true
-                  echo "== GA service, browser user agent, Origin windy.com =="
-                  curl -sS -m 60 -D - -o /dev/null -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36' \
-                    -H 'Origin: https://www.windy.com' "$U" | tr -d '\r' | head -20 || true
             - name: Fetch grid data
               run: node scripts/fetch-grid-data.mjs
             - name: Commit snapshot
