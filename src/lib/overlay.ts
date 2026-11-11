@@ -54,6 +54,60 @@ function capacityRadius(mw: number | null): number {
     return Math.max(4, Math.min(14, 3 + Math.sqrt(mw) / 3.2));
 }
 
+interface PointTarget {
+    lat: number;
+    lng: number;
+    /** Drawn radius in pixels. */
+    radius: number;
+    open: (latlng: { lat: number; lng: number }) => void;
+}
+
+interface LineTarget {
+    feature: Feature;
+    cls: VoltageClass;
+    /** west, south, east, north */
+    box: [number, number, number, number];
+}
+
+/** Line parts as arrays of [lng, lat], whether the geometry is single or multi-part. */
+function lineParts(f: Feature): number[][][] {
+    const g = f.geometry;
+    if (!g) {
+        return [];
+    }
+    return g.type === 'LineString' ? [g.coordinates] : g.type === 'MultiLineString' ? g.coordinates : [];
+}
+
+function lineBox(f: Feature): [number, number, number, number] {
+    let w = 180;
+    let s = 90;
+    let e = -180;
+    let n = -90;
+    for (const part of lineParts(f)) {
+        for (const c of part) {
+            w = Math.min(w, c[0]);
+            e = Math.max(e, c[0]);
+            s = Math.min(s, c[1]);
+            n = Math.max(n, c[1]);
+        }
+    }
+    return [w, s, e, n];
+}
+
+/** Web-Mercator northing expressed in degrees, so x (longitude) and y share one scale. */
+function mercatorY(lat: number): number {
+    const clamped = Math.max(-85, Math.min(85, lat));
+    return (180 / Math.PI) * Math.log(Math.tan(Math.PI / 4 + (clamped * Math.PI) / 360));
+}
+
+function distanceToSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const len2 = dx * dx + dy * dy;
+    const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2));
+    return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
 /**
  * Owns every map layer the plugin draws. Receives the Leaflet namespace and the
  * Windy map instance rather than importing them, so the logic can be exercised
@@ -68,6 +122,13 @@ export class GridOverlay {
     private generatorLayer: any = null;
     private flowLayer: any = null;
     private popup: any = null;
+
+    // What a tap can land on. Taps are resolved here, not by the map library, so
+    // that thin lines and small circles are easy to hit on a phone.
+    private lineIndex: LineTarget[] = [];
+    private generatorTargets: PointTarget[] = [];
+    private majorSubstationTargets: PointTarget[] = [];
+    private minorSubstationTargets: PointTarget[] = [];
 
     private ga: GaData | null = null;
     private facilities: OeFacility[] = [];
@@ -202,8 +263,7 @@ export class GridOverlay {
     refreshVisibility(): void {
         const zoom = Number(this.map.getZoom?.() ?? 5);
         for (const style of VOLTAGE_STYLES) {
-            const show =
-                this.layerOn.lines && !!this.classOn.get(style.id) && zoom >= style.minZoom;
+            const show = this.classShown(style.id, zoom);
             for (const layer of this.lineLayers.get(style.id) ?? []) {
                 this.toggle(layer, show);
             }
@@ -213,6 +273,90 @@ export class GridOverlay {
         }
         this.toggle(this.generatorLayer, this.layerOn.generators);
         this.toggle(this.flowLayer, this.layerOn.flows);
+    }
+
+    /**
+     * Resolves a tap on the map. Opens the details popup of the nearest visible generator,
+     * substation or line within `tolerancePx` and returns true; returns false on a miss.
+     */
+    handleMapClick(lat: number, lng: number, tolerancePx: number): boolean {
+        const zoom = Number(this.map.getZoom?.() ?? 5);
+        const scale = this.pixelsPerDegree(zoom);
+        const cx = lng * scale;
+        const cy = mercatorY(lat) * scale;
+
+        // Points win over lines: substations and stations sit on top of the lines they join.
+        let bestPoint: { d: number; target: PointTarget } | null = null;
+        const consider = (targets: PointTarget[]) => {
+            for (const t of targets) {
+                const d = Math.hypot(t.lng * scale - cx, mercatorY(t.lat) * scale - cy) - t.radius;
+                if (d <= tolerancePx && (!bestPoint || d < bestPoint.d)) {
+                    bestPoint = { d, target: t };
+                }
+            }
+        };
+        if (this.layerOn.generators) {
+            consider(this.generatorTargets);
+        }
+        if (this.layerOn.substations && zoom >= MAJOR_SUBSTATION_MIN_ZOOM) {
+            consider(this.majorSubstationTargets);
+        }
+        if (this.layerOn.substations && zoom >= SUBSTATION_MIN_ZOOM) {
+            consider(this.minorSubstationTargets);
+        }
+        if (bestPoint) {
+            const { target } = bestPoint as { d: number; target: PointTarget };
+            target.open({ lat: target.lat, lng: target.lng });
+            return true;
+        }
+
+        const reach = tolerancePx / scale; // tolerance in degrees of longitude
+        const rank = (cls: VoltageClass) => VOLTAGE_STYLES.findIndex(v => v.id === cls);
+        let bestLine: { d: number; item: LineTarget } | null = null;
+        for (const item of this.lineIndex) {
+            if (!this.classShown(item.cls, zoom)) {
+                continue;
+            }
+            const [w, s, e, n] = item.box;
+            if (lng < w - reach || lng > e + reach || lat < s - reach || lat > n + reach) {
+                continue;
+            }
+            let d = Infinity;
+            for (const part of lineParts(item.feature)) {
+                for (let i = 1; i < part.length; i++) {
+                    d = Math.min(
+                        d,
+                        distanceToSegment(
+                            cx,
+                            cy,
+                            part[i - 1][0] * scale,
+                            mercatorY(part[i - 1][1]) * scale,
+                            part[i][0] * scale,
+                            mercatorY(part[i][1]) * scale,
+                        ),
+                    );
+                }
+            }
+            if (d > tolerancePx) {
+                continue;
+            }
+            // Nearest line wins; where lines share a route, the higher voltage wins.
+            const current = bestLine as { d: number; item: LineTarget } | null;
+            if (
+                !current ||
+                d < current.d - 1 ||
+                (Math.abs(d - current.d) <= 1 && rank(item.cls) > rank(current.item.cls))
+            ) {
+                bestLine = { d, item };
+            }
+        }
+        if (bestLine) {
+            const { item } = bestLine as { d: number; item: LineTarget };
+            this.openFacilityCode = null;
+            this.openPopup({ lat, lng }, this.lineHtml(item.feature, item.cls));
+            return true;
+        }
+        return false;
     }
 
     /** Largest facilities currently on screen, for a bounded live-data request. */
@@ -245,6 +389,7 @@ export class GridOverlay {
     destroy(): void {
         this.lineLayers.forEach(layers => layers.forEach(l => this.removeLayer(l)));
         this.lineLayers.clear();
+        this.lineIndex = [];
         this.substationLayers.forEach(s => this.removeLayer(s.layer));
         this.substationLayers = [];
         [this.generatorLayer, this.flowLayer].forEach(l => this.removeLayer(l));
@@ -262,6 +407,7 @@ export class GridOverlay {
     private buildLines(): void {
         this.lineLayers.forEach(layers => layers.forEach(l => this.removeLayer(l)));
         this.lineLayers.clear();
+        this.lineIndex = [];
         if (!this.ga) {
             return;
         }
@@ -272,6 +418,7 @@ export class GridOverlay {
                 byClass.set(cls, []);
             }
             (byClass.get(cls) as Feature[]).push(f);
+            this.lineIndex.push({ feature: f, cls, box: lineBox(f) });
         }
 
         for (const style of VOLTAGE_STYLES) {
@@ -279,36 +426,20 @@ export class GridOverlay {
             if (!features || !features.length) {
                 continue;
             }
-            const collection = { type: 'FeatureCollection', features };
-            const bind = (feature: Feature, layer: any) =>
-                this.onClick(layer, latlng => {
-                    this.openFacilityCode = null;
-                    this.openPopup(latlng, this.lineHtml(feature, style.id));
-                });
-
-            const visible = new this.L.GeoJSON(collection, {
-                bubblingMouseEvents: false,
-                style: (feature: Feature) => ({
-                    bubblingMouseEvents: false,
-                    color: style.color,
-                    weight: style.weight,
-                    opacity: isOperational(feature) ? 0.95 : 0.4,
-                    dashArray: isOperational(feature) ? undefined : '4 4',
-                }),
-                onEachFeature: bind,
-            });
-            // Wide, near-invisible twin so thin lines are easy to tap on a phone.
-            const hit = new this.L.GeoJSON(collection, {
-                bubblingMouseEvents: false,
-                style: () => ({
-                    bubblingMouseEvents: false,
-                    color: style.color,
-                    weight: 14,
-                    opacity: 0.01,
-                }),
-                onEachFeature: bind,
-            });
-            this.lineLayers.set(style.id, [hit, visible]);
+            const visible = new this.L.GeoJSON(
+                { type: 'FeatureCollection', features },
+                {
+                    interactive: false,
+                    style: (feature: Feature) => ({
+                        interactive: false,
+                        color: style.color,
+                        weight: style.weight,
+                        opacity: isOperational(feature) ? 0.95 : 0.4,
+                        dashArray: isOperational(feature) ? undefined : '4 4',
+                    }),
+                },
+            );
+            this.lineLayers.set(style.id, [visible]);
         }
     }
 
@@ -318,6 +449,8 @@ export class GridOverlay {
         if (!this.ga) {
             return;
         }
+        this.majorSubstationTargets = [];
+        this.minorSubstationTargets = [];
         const major = new this.L.FeatureGroup();
         const minor = new this.L.FeatureGroup();
         for (const f of this.ga.substations) {
@@ -330,7 +463,7 @@ export class GridOverlay {
             const isMajor = kv !== null && kv >= 200;
             const live = isOperational(f);
             const marker = new this.L.CircleMarker(at, {
-                bubblingMouseEvents: false,
+                interactive: false,
                 radius: isMajor ? 4.5 : 3.5,
                 color: kv ? VOLTAGE_BY_ID[cls].color : '#333',
                 weight: isMajor ? 2 : 1.5,
@@ -338,7 +471,7 @@ export class GridOverlay {
                 fillColor: '#ffffff',
                 fillOpacity: live ? 1 : 0.5,
             });
-            this.onClick(marker, latlng => {
+            this.pointTarget(isMajor ? this.majorSubstationTargets : this.minorSubstationTargets, at, isMajor ? 4.5 : 3.5, latlng => {
                 this.openFacilityCode = null;
                 const subtype = String(prop(f.properties, 'FEATURE_SUBTYPE') ?? '');
                 const kind = subtype && subtype !== 'Substation' ? `${subtype} substation` : 'Substation';
@@ -381,6 +514,7 @@ export class GridOverlay {
 
     private buildGenerators(): void {
         this.removeLayer(this.generatorLayer);
+        this.generatorTargets = [];
         const group = new this.L.FeatureGroup();
 
         for (const f of this.gaStations()) {
@@ -399,7 +533,7 @@ export class GridOverlay {
             }
             const mw = num(prop(p, 'GENERATION_CAPACITY_MW', 'GENERATIONMW', 'CAPACITY_MW'));
             const marker = new this.L.CircleMarker(at, {
-                bubblingMouseEvents: false,
+                interactive: false,
                 radius: capacityRadius(mw),
                 color: '#ffffff',
                 weight: 1,
@@ -407,7 +541,7 @@ export class GridOverlay {
                 fillColor: FUEL_STYLES[fuel].color,
                 fillOpacity: isOperational(f) ? 0.85 : 0.3,
             });
-            this.onClick(marker, latlng => {
+            this.pointTarget(this.generatorTargets, at, capacityRadius(mw), latlng => {
                 this.openFacilityCode = null;
                 this.openPopup(
                     latlng,
@@ -431,7 +565,7 @@ export class GridOverlay {
             const marker = new this.L.CircleMarker(
                 { lat: f.lat, lng: f.lng },
                 {
-                    bubblingMouseEvents: false,
+                    interactive: false,
                     radius: capacityRadius(f.capacity),
                     // A bright ring marks stations that are generating right now.
                     color: live && (output as number) > 1 ? '#00ff9c' : '#ffffff',
@@ -443,7 +577,7 @@ export class GridOverlay {
                         : 0.85,
                 },
             );
-            this.onClick(marker, latlng => {
+            this.pointTarget(this.generatorTargets, { lat: f.lat, lng: f.lng }, capacityRadius(f.capacity), latlng => {
                 this.openFacilityCode = f.code;
                 const fresh = f.units.some(u => this.readings.has(u.code));
                 this.openPopup(latlng, this.facilityHtml(f, !fresh));
@@ -543,6 +677,36 @@ export class GridOverlay {
     }
 
     // ---------- Leaflet helpers ----------
+
+    private classShown(id: VoltageClass, zoom: number): boolean {
+        return this.layerOn.lines && !!this.classOn.get(id) && zoom >= VOLTAGE_BY_ID[id].minZoom;
+    }
+
+    /** Screen pixels per degree of longitude, measured from the map itself. */
+    private pixelsPerDegree(zoom: number): number {
+        try {
+            const b = this.map.getBounds();
+            const span = b.getEast() - b.getWest();
+            const el = this.map.getContainer?.();
+            const width =
+                (el && el.clientWidth) || (typeof window !== 'undefined' ? window.innerWidth : 0);
+            if (span > 0 && width > 0) {
+                return width / span;
+            }
+        } catch (e) {
+            // fall through to the estimate
+        }
+        return (256 * Math.pow(2, zoom)) / 360;
+    }
+
+    private pointTarget(
+        list: PointTarget[],
+        at: { lat: number; lng: number },
+        radius: number,
+        open: (latlng: { lat: number; lng: number }) => void,
+    ): void {
+        list.push({ lat: at.lat, lng: at.lng, radius, open });
+    }
 
     private badge(lat: number, lng: number, html: string, bg: string, fg: string): any {
         const icon = this.makeDivIcon(

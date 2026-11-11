@@ -169,6 +169,7 @@
     import bcast from '@windy/broadcast';
     import { map } from '@windy/map';
     import { isMobileOrTablet } from '@windy/rootScope';
+    import { singleclick } from '@windy/singleclick';
     import { onDestroy, onMount } from 'svelte';
 
     import config from './pluginConfig';
@@ -187,7 +188,9 @@
     import type { OeFacility } from './lib/oe';
     import type { LayerId } from './lib/overlay';
 
-    const { title } = config;
+    const { name, title } = config;
+    // Fingers are less precise than a mouse pointer.
+    const TAP_TOLERANCE_PX = isMobileOrTablet ? 18 : 8;
     const STORAGE_KEY = 'windy-plugin-au-grid:oe-key';
     const MAX_LIVE_FACILITIES = 90;
     const REFRESH_MS = 5 * 60 * 1000;
@@ -264,6 +267,28 @@
         classOn[id] = !classOn[id];
         classOn = classOn;
         overlay?.setClassVisible(id, classOn[id]);
+    }
+
+    /**
+     * Windy sends map taps here while the plugin is open (listenToSingleclick in pluginConfig).
+     * A tap on grid infrastructure opens its details; anything else goes back to Windy's
+     * own weather picker so the map still behaves normally.
+     */
+    function onMapClick(position: { lat: number; lon: number }): void {
+        if (!position || !overlay) {
+            return;
+        }
+        const hit = overlay.handleMapClick(position.lat, position.lon, TAP_TOLERANCE_PX);
+        if (!hit) {
+            try {
+                bcast.emit('rqstOpen', isMobileOrTablet ? 'picker-mobile' : 'picker', {
+                    lat: position.lat,
+                    lon: position.lon,
+                });
+            } catch (e) {
+                // No picker available in this Windy version; nothing else to do.
+            }
+        }
     }
 
     function onZoom(): void {
@@ -447,6 +472,7 @@
             void loadFacilityLive(facility);
         };
         map.on('zoomend', onZoom);
+        singleclick.on(name, onMapClick);
 
         showAustralia();
         apiKey = LIVE_DATA_ENABLED ? readStoredKey() : '';
@@ -463,6 +489,7 @@
             clearInterval(timer);
         }
         map.off('zoomend', onZoom);
+        singleclick.off(name, onMapClick);
         overlay?.destroy();
         overlay = null;
     });
