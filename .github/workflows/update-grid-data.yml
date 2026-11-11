@@ -21,10 +21,21 @@ jobs:
               run: |
                   git config user.name "github-actions[bot]"
                   git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-                  git add data/grid.json
-                  if git diff --cached --quiet; then
-                    echo "No change in grid data."
-                  else
+                  git add data
+                  if ! git diff --cached --quiet; then
                     git commit -m "Update grid data snapshot from Geoscience Australia"
+                    git push
+                    exit 0
+                  fi
+                  echo "No change in grid data."
+                  # GitHub pauses scheduled workflows in a public repo after 60 days without
+                  # activity. If nothing has been committed for 45 days, record the check so
+                  # the weekly refresh keeps running.
+                  age_days=$(( ( $(date +%s) - $(git log -1 --format=%ct) ) / 86400 ))
+                  echo "Last commit was ${age_days} days ago."
+                  if [ "$age_days" -ge 45 ]; then
+                    date -u +%F > data/last-checked.txt
+                    git add data/last-checked.txt
+                    git commit -m "Record grid data check (no change) to keep the weekly refresh active"
                     git push
                   fi

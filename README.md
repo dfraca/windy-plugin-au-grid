@@ -49,6 +49,10 @@ workflow, so changes Geoscience Australia makes, such as a line moving from "Und
 to "Operational", reach the plugin within a week. To refresh sooner: Actions tab →
 `update-grid-data` → Run workflow. No republish is needed.
 
+The file is only rewritten when the network has changed. GitHub pauses scheduled workflows in
+public repos after 60 days without activity, so if nothing has been committed for 45 days the
+workflow commits a one-line `data/last-checked.txt` to keep itself running.
+
 HVDC links are identified by name, because the data has no AC/DC field: Basslink
 ("Basslink-Loy Yang to Basslink-George Town"), Murraylink ("Monash to Red Cliffs Terminal") and
 Directlink ("Mullumbimby to Bungalora"). The list is in `src/lib/config.ts`.

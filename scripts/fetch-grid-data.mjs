@@ -4,7 +4,7 @@
 //
 // Run with: node scripts/fetch-grid-data.mjs        (Node 18+, no dependencies)
 
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 
 const SERVICE =
     process.env.GRID_SERVICE ||
@@ -157,6 +157,24 @@ const snapshot = {
     stations,
 };
 mkdirSync(OUT_DIR, { recursive: true });
+const file = `${OUT_DIR}/grid.json`;
+
+// Leave the file alone when the network itself is unchanged, so the repo only gains a commit
+// when Geoscience Australia has actually edited something.
+if (existsSync(file)) {
+    try {
+        const old = JSON.parse(readFileSync(file, 'utf8'));
+        const same =
+            JSON.stringify([old.lines, old.substations, old.stations]) ===
+            JSON.stringify([lines, substations, stations]);
+        if (same) {
+            console.log(`\nNo change since the snapshot of ${old.meta?.fetched}; ${file} left as is.`);
+            process.exit(0);
+        }
+    } catch (e) {
+        console.log(`Existing snapshot unreadable (${e.message}); rewriting it.`);
+    }
+}
 const body = JSON.stringify(snapshot);
-writeFileSync(`${OUT_DIR}/grid.json`, body);
-console.log(`\nWrote ${OUT_DIR}/grid.json (${(body.length / 1e6).toFixed(2)} MB)`);
+writeFileSync(file, body);
+console.log(`\nWrote ${file} (${(body.length / 1e6).toFixed(2)} MB)`);
