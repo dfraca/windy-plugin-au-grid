@@ -8,6 +8,11 @@ Australian power grid overlay for Windy.com.
   sized by capacity).
 - **Tap or click anything** for its details.
 - Lines under 220 kV appear from zoom 6; lines under 110 kV and smaller substations from zoom 8.
+- **Name labels** appear as you zoom in (name plus MW or kV): large power stations first, then
+  all stations, then 220 kV+ substations and lines, then everything. Labels that would overlap are
+  left out, biggest assets first. Thresholds are `LABEL_ZOOM` in `src/lib/overlay.ts`.
+- While the plugin is open, taps on the map go to the plugin; a tap that misses the grid is handed
+  back to Windy's weather picker.
 
 This repository is Windy's official
 [plugin template](https://github.com/windycom/windy-plugin-template) (v5.0.1) with the plugin

@@ -206,6 +206,7 @@
         { id: 'substations', label: 'Substations', long: 'Substations' },
         { id: 'generators', label: 'Generators', long: 'Power stations' },
         { id: 'flows', label: 'Flows', long: 'Live flows between regions' },
+        { id: 'labels', label: 'Labels', long: 'Names when zoomed in' },
     ];
     const layerChips = allLayerChips.filter(c => LIVE_DATA_ENABLED || c.id !== 'flows');
 
@@ -220,6 +221,7 @@
         substations: true,
         generators: true,
         flows: true,
+        labels: true,
     };
     let classOn = Object.fromEntries(VOLTAGE_STYLES.map(s => [s.id, true])) as Record<
         VoltageClass,
@@ -293,6 +295,11 @@
 
     function onZoom(): void {
         overlay?.refreshVisibility();
+    }
+
+    /** Labels exist only for what is on screen, so they are rebuilt after every pan. */
+    function onMove(): void {
+        overlay?.refreshLabels();
     }
 
     function setLive(message: string, isError = false): void {
@@ -472,6 +479,7 @@
             void loadFacilityLive(facility);
         };
         map.on('zoomend', onZoom);
+        map.on('moveend', onMove);
         singleclick.on(name, onMapClick);
 
         showAustralia();
@@ -489,6 +497,7 @@
             clearInterval(timer);
         }
         map.off('zoomend', onZoom);
+        map.off('moveend', onMove);
         singleclick.off(name, onMapClick);
         overlay?.destroy();
         overlay = null;
