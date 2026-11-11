@@ -16,6 +16,16 @@
                     {chip.label}
                 </button>
             {/each}
+            <span class="sep"></span>
+            {#each labelChips as chip}
+                <button
+                    class="chip"
+                    class:off={!labelShow[chip.id]}
+                    on:click={() => toggleLabel(chip.id)}
+                >
+                    {chip.label}
+                </button>
+            {/each}
             {#if LIVE_DATA_ENABLED}
                 <button
                     class="chip live"
@@ -89,7 +99,6 @@
                     on:change={() => toggleLayer(chip.id)}
                 />
                 {chip.long}
-                {#if chip.id === 'substations'}<span class="hint">(zoom in)</span>{/if}
             </label>
         {/each}
 
@@ -107,7 +116,19 @@
             </label>
         {/each}
 
-        <h4>Generators</h4>
+        <h4>Labels</h4>
+        {#each labelChips as chip}
+            <label class="check">
+                <input
+                    type="checkbox"
+                    checked={labelShow[chip.id]}
+                    on:change={() => toggleLabel(chip.id)}
+                />
+                {chip.long}
+            </label>
+        {/each}
+
+        <h4>Power stations</h4>
         <div class="fuels">
             {#each fuels as fuel}
                 <span class="fuel">
@@ -186,7 +207,7 @@
     // IMPORTANT: types must be imported with `import type`, or the Svelte TS compiler fails.
     import type { VoltageClass } from './lib/config';
     import type { OeFacility } from './lib/oe';
-    import type { LayerId } from './lib/overlay';
+    import type { LabelKind, LayerId } from './lib/overlay';
 
     const { name, title } = config;
     // Fingers are less precise than a mouse pointer.
@@ -204,9 +225,13 @@
     const allLayerChips: { id: LayerId; label: string; long: string }[] = [
         { id: 'lines', label: 'Lines', long: 'Power lines' },
         { id: 'substations', label: 'Substations', long: 'Substations' },
-        { id: 'generators', label: 'Generators', long: 'Power stations' },
+        { id: 'generators', label: 'Power stations', long: 'Power stations' },
         { id: 'flows', label: 'Flows', long: 'Live flows between regions' },
-        { id: 'labels', label: 'Labels', long: 'Names when zoomed in' },
+    ];
+    const labelChips: { id: LabelKind; label: string; long: string }[] = [
+        { id: 'lines', label: 'Line labels', long: 'Power lines' },
+        { id: 'substations', label: 'Substation labels', long: 'Substations' },
+        { id: 'stations', label: 'Station labels', long: 'Power stations' },
     ];
     const layerChips = allLayerChips.filter(c => LIVE_DATA_ENABLED || c.id !== 'flows');
 
@@ -221,8 +246,8 @@
         substations: true,
         generators: true,
         flows: true,
-        labels: true,
     };
+    let labelShow: Record<LabelKind, boolean> = { lines: true, substations: true, stations: true };
     let classOn = Object.fromEntries(VOLTAGE_STYLES.map(s => [s.id, true])) as Record<
         VoltageClass,
         boolean
@@ -263,6 +288,12 @@
         show[id] = !show[id];
         show = show;
         overlay?.setLayerVisible(id, show[id]);
+    }
+
+    function toggleLabel(id: LabelKind): void {
+        labelShow[id] = !labelShow[id];
+        labelShow = labelShow;
+        overlay?.setLabelVisible(id, labelShow[id]);
     }
 
     function toggleClass(id: VoltageClass): void {

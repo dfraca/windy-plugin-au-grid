@@ -8,9 +8,13 @@ Australian power grid overlay for Windy.com.
   sized by capacity).
 - **Tap or click anything** for its details.
 - Lines under 220 kV appear from zoom 6; lines under 110 kV and smaller substations from zoom 8.
-- **Name labels** appear as you zoom in (name plus MW or kV): large power stations first, then
-  all stations, then 220 kV+ substations and lines, then everything. Labels that would overlap are
-  left out, biggest assets first. Thresholds are `LABEL_ZOOM` in `src/lib/overlay.ts`.
+- **Name labels** appear as you zoom in: large power stations first, then all stations, then
+  220 kV+ substations and lines, then everything. Stations and substations show the name with MW or
+  kV beneath; lines show "name · kV" written along the line. Labels that would overlap are left
+  out, biggest assets first. Each kind has its own switch. Thresholds are `LABEL_ZOOM` in
+  `src/lib/overlay.ts`.
+- A **voltage tick box** switches that voltage's lines and its substations together (power
+  stations are unaffected). Substations with no recorded voltage count as "Below 110 kV".
 - While the plugin is open, taps on the map go to the plugin; a tap that misses the grid is handed
   back to Windy's weather picker.
 

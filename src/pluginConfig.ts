@@ -2,7 +2,7 @@ import type { ExternalPluginConfig } from '@windy/interfaces';
 
 const config: ExternalPluginConfig = {
     name: 'windy-plugin-au-grid',
-    version: '0.1.3',
+    version: '0.1.4',
     icon: '⚡',
     title: 'Australian Power Grid',
     description:

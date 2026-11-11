@@ -15,7 +15,8 @@ import type { Feature, GaData } from './ga';
 import type { CorridorFlow, OeFacility, RegionReading, UnitReading } from './oe';
 import { distanceKm, esc, fmtMW, num, popupHtml, prop, propsRows, row, swatch } from './util';
 
-export type LayerId = 'lines' | 'substations' | 'generators' | 'flows' | 'labels';
+export type LayerId = 'lines' | 'substations' | 'generators' | 'flows';
+export type LabelKind = 'lines' | 'substations' | 'stations';
 
 const GA_CREDIT = 'Source: Geoscience Australia, Electricity Infrastructure';
 const NAME_FIELDS = ['FEATURE_NAME', 'NAME'];
@@ -59,8 +60,9 @@ interface PointTarget {
     lng: number;
     /** Drawn radius in pixels. */
     radius: number;
-    /** Map label, e.g. "Eraring · 2880 MW". */
+    /** Map label: the name, with the MW or kV figure on a second line. */
     label: string;
+    detail: string;
     /** MW or kV; bigger assets get their label first when space is tight. */
     weight: number;
     open: (latlng: { lat: number; lng: number }) => void;
@@ -73,8 +75,22 @@ interface LineTarget {
     box: [number, number, number, number];
     label: string;
     kv: number;
-    /** Point half-way along the line, [lng, lat]; worked out on first use. */
-    mid?: number[];
+    /** Half-way along the line; worked out on first use. */
+    mid?: LineAnchor | null;
+}
+
+/** A position on a line: `t` of the way from vertex `i` to vertex `i + 1` of `part`. */
+interface LineAnchor {
+    part: number[][];
+    i: number;
+    t: number;
+}
+
+/** 220 kV and above, and the DC links: shown and labelled from further out. */
+const MAJOR_CLASSES: VoltageClass[] = ['hvdc', '500', '330', '275', '220'];
+
+function substationMinZoom(cls: VoltageClass): number {
+    return MAJOR_CLASSES.includes(cls) ? MAJOR_SUBSTATION_MIN_ZOOM : SUBSTATION_MIN_ZOOM;
 }
 
 /** Zoom from which each kind of label appears. */
@@ -89,38 +105,14 @@ const LABEL_ZOOM = {
 };
 const MAX_LABELS = 70;
 const LABEL_FONT_PX = 11;
+const LABEL_CHAR_PX = LABEL_FONT_PX * 0.58;
+/** How far a line's label sits above the line, in pixels. */
+const LINE_LABEL_LIFT_PX = 8;
+const LABEL_HALO = 'text-shadow:0 0 2px #000,0 0 3px #000,0 0 4px #000,0 0 5px #000';
 
 function shorten(name: string): string {
     const clean = name.replace(/\s+/g, ' ').trim();
     return clean.length > 36 ? `${clean.slice(0, 35)}…` : clean;
-}
-
-/** Point half-way along a line, as [lng, lat]. */
-function midPoint(f: Feature): number[] | null {
-    const parts = lineParts(f);
-    const part = [...parts].sort((a, b) => b.length - a.length)[0];
-    if (!part || part.length < 2) {
-        return part && part[0] ? part[0] : null;
-    }
-    const seg: number[] = [];
-    let total = 0;
-    for (let i = 1; i < part.length; i++) {
-        const d = Math.hypot(part[i][0] - part[i - 1][0], part[i][1] - part[i - 1][1]);
-        seg.push(d);
-        total += d;
-    }
-    let run = total / 2;
-    for (let i = 0; i < seg.length; i++) {
-        if (run <= seg[i]) {
-            const t = seg[i] === 0 ? 0 : run / seg[i];
-            return [
-                part[i][0] + t * (part[i + 1][0] - part[i][0]),
-                part[i][1] + t * (part[i + 1][1] - part[i][1]),
-            ];
-        }
-        run -= seg[i];
-    }
-    return part[part.length - 1];
 }
 
 /** Line parts as arrays of [lng, lat], whether the geometry is single or multi-part. */
@@ -162,6 +154,81 @@ function distanceToSegment(px: number, py: number, ax: number, ay: number, bx: n
     return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
 }
 
+/** Half-way along the longest part of a line. */
+function midAnchor(f: Feature): LineAnchor | null {
+    const part = [...lineParts(f)].sort((a, b) => b.length - a.length)[0];
+    if (!part || part.length < 2) {
+        return null;
+    }
+    const seg: number[] = [];
+    let total = 0;
+    for (let i = 1; i < part.length; i++) {
+        const d = Math.hypot(part[i][0] - part[i - 1][0], part[i][1] - part[i - 1][1]);
+        seg.push(d);
+        total += d;
+    }
+    let run = total / 2;
+    for (let i = 0; i < seg.length; i++) {
+        if (run <= seg[i]) {
+            return { part, i, t: seg[i] === 0 ? 0 : run / seg[i] };
+        }
+        run -= seg[i];
+    }
+    return { part, i: part.length - 2, t: 1 };
+}
+
+/** The anchor's position as [lng, lat]. */
+function anchorPoint(a: LineAnchor): number[] {
+    const from = a.part[a.i];
+    const to = a.part[a.i + 1];
+    if (!to || a.t === 0) {
+        return from;
+    }
+    return [from[0] + a.t * (to[0] - from[0]), from[1] + a.t * (to[1] - from[1])];
+}
+
+/**
+ * Direction of the line around an anchor, in screen degrees (clockwise, as CSS rotates),
+ * kept between -90 and 90 so text never reads upside down. Measured between the points
+ * `halfWidthPx` either side along the line, so a label follows the general run of a
+ * winding line and not one short kink.
+ */
+function anchorAngle(a: LineAnchor, scale: number, halfWidthPx: number): number {
+    const screen = (c: number[]) => [c[0] * scale, -mercatorY(c[1]) * scale];
+    const here = screen(anchorPoint(a));
+    const walk = (indices: number[]): number[] => {
+        let need = halfWidthPx;
+        let prev = here;
+        for (const k of indices) {
+            const q = screen(a.part[k]);
+            const d = Math.hypot(q[0] - prev[0], q[1] - prev[1]);
+            if (d >= need && d > 0) {
+                return [prev[0] + ((q[0] - prev[0]) * need) / d, prev[1] + ((q[1] - prev[1]) * need) / d];
+            }
+            need -= d;
+            prev = q;
+        }
+        return prev;
+    };
+    const before: number[] = [];
+    for (let k = a.i; k >= 0; k--) {
+        before.push(k);
+    }
+    const after: number[] = [];
+    for (let k = a.i + 1; k < a.part.length; k++) {
+        after.push(k);
+    }
+    const back = walk(before);
+    const fwd = walk(after);
+    let angle = (Math.atan2(fwd[1] - back[1], fwd[0] - back[0]) * 180) / Math.PI;
+    if (angle > 90) {
+        angle -= 180;
+    } else if (angle <= -90) {
+        angle += 180;
+    }
+    return angle;
+}
+
 /**
  * Owns every map layer the plugin draws. Receives the Leaflet namespace and the
  * Windy map instance rather than importing them, so the logic can be exercised
@@ -172,7 +239,8 @@ export class GridOverlay {
     private map: any;
 
     private lineLayers = new Map<VoltageClass, any[]>();
-    private substationLayers: { layer: any; minZoom: number }[] = [];
+    /** One group per voltage class, so the voltage tick boxes switch substations as well as lines. */
+    private substationLayers = new Map<VoltageClass, any>();
     private generatorLayer: any = null;
     private flowLayer: any = null;
     private labelLayer: any = null;
@@ -182,8 +250,7 @@ export class GridOverlay {
     // that thin lines and small circles are easy to hit on a phone.
     private lineIndex: LineTarget[] = [];
     private generatorTargets: PointTarget[] = [];
-    private majorSubstationTargets: PointTarget[] = [];
-    private minorSubstationTargets: PointTarget[] = [];
+    private substationTargets = new Map<VoltageClass, PointTarget[]>();
 
     private ga: GaData | null = null;
     private facilities: OeFacility[] = [];
@@ -195,8 +262,8 @@ export class GridOverlay {
         substations: true,
         generators: true,
         flows: true,
-        labels: true,
     };
+    private labelOn: Record<LabelKind, boolean> = { lines: true, substations: true, stations: true };
     private classOn = new Map<VoltageClass, boolean>(VOLTAGE_STYLES.map(s => [s.id, true]));
 
     /** Called when a generator with a live-data code is clicked. */
@@ -310,6 +377,12 @@ export class GridOverlay {
         this.refreshVisibility();
     }
 
+    setLabelVisible(kind: LabelKind, on: boolean): void {
+        this.labelOn[kind] = on;
+        this.refreshLabels();
+    }
+
+    /** A voltage tick box switches that voltage's lines and its substations together. */
     setClassVisible(id: VoltageClass, on: boolean): void {
         this.classOn.set(id, on);
         this.refreshVisibility();
@@ -324,9 +397,9 @@ export class GridOverlay {
                 this.toggle(layer, show);
             }
         }
-        for (const s of this.substationLayers) {
-            this.toggle(s.layer, this.layerOn.substations && zoom >= s.minZoom);
-        }
+        this.substationLayers.forEach((layer, cls) => {
+            this.toggle(layer, this.substationShown(cls, zoom));
+        });
         this.toggle(this.generatorLayer, this.layerOn.generators);
         this.toggle(this.flowLayer, this.layerOn.flows);
         this.refreshLabels();
@@ -336,12 +409,16 @@ export class GridOverlay {
      * Rebuilds the name labels for what is on screen. Call after the map moves or zooms.
      * Labels only exist for the current view, biggest assets first, and one that would
      * overlap an earlier label is left out, so the map never fills with text.
+     *
+     * Stations and substations get the name with the MW or kV on a second line, beside the
+     * marker. Lines get "name · kV" written along the line, just above it.
      */
     refreshLabels(): void {
         this.removeLayer(this.labelLayer);
         this.labelLayer = null;
         const zoom = Number(this.map.getZoom?.() ?? 5);
-        if (!this.layerOn.labels || zoom < LABEL_ZOOM.bigStations) {
+        const anyOn = this.labelOn.lines || this.labelOn.substations || this.labelOn.stations;
+        if (!anyOn || zoom < LABEL_ZOOM.bigStations) {
             return;
         }
         let view: { w: number; s: number; e: number; n: number };
@@ -355,48 +432,71 @@ export class GridOverlay {
         const inView = (lat: number, lng: number) =>
             lat >= view.s && lat <= view.n && lng >= view.w && lng <= view.e;
 
+        type Rect = { x: number; y: number; w: number; h: number };
         type Candidate = {
             lat: number;
             lng: number;
-            text: string;
-            color: string;
-            /** Pixels from the anchor to the label's left edge; null centres the label. */
-            offset: number | null;
+            key: string;
+            html: string;
+            /** Screen area the label covers, as one or more rectangles. */
+            rects: Rect[];
             order: number;
         };
         const candidates: Candidate[] = [];
+        const lineHeight = LABEL_FONT_PX + 2;
+        const baseStyle =
+            `position:absolute;white-space:nowrap;pointer-events:none;` +
+            `font:600 ${LABEL_FONT_PX}px/${lineHeight}px sans-serif;${LABEL_HALO}`;
 
         const addPoints = (targets: PointTarget[], color: string, tier: number, minWeight = 0) => {
             for (const t of targets) {
-                if (t.label && t.weight >= minWeight && inView(t.lat, t.lng)) {
-                    candidates.push({
-                        lat: t.lat,
-                        lng: t.lng,
-                        text: t.label,
-                        color,
-                        offset: t.radius + 4,
-                        order: tier * 1e6 - t.weight,
-                    });
+                if (!t.label || t.weight < minWeight || !inView(t.lat, t.lng)) {
+                    continue;
                 }
+                const offset = Math.round(t.radius + 4);
+                const width = Math.max(t.label.length, t.detail.length) * LABEL_CHAR_PX + 4;
+                const height = (t.detail ? 2 : 1) * lineHeight;
+                candidates.push({
+                    lat: t.lat,
+                    lng: t.lng,
+                    key: `${t.label}|${t.detail}`,
+                    html:
+                        `<div style="${baseStyle};left:${offset}px;transform:translateY(-50%);color:${color}">` +
+                        esc(t.label) +
+                        (t.detail ? `<br><span style="font-weight:400">${esc(t.detail)}</span>` : '') +
+                        `</div>`,
+                    rects: [
+                        {
+                            x: t.lng * scale + offset,
+                            y: -mercatorY(t.lat) * scale - height / 2,
+                            w: width,
+                            h: height,
+                        },
+                    ],
+                    order: tier * 1e6 - t.weight,
+                });
             }
         };
-        if (this.layerOn.generators) {
+        if (this.labelOn.stations && this.layerOn.generators) {
             addPoints(this.generatorTargets, '#ffffff', 0, zoom >= LABEL_ZOOM.stations ? 0 : 500);
         }
-        if (this.layerOn.substations && zoom >= LABEL_ZOOM.majorSubstations) {
-            addPoints(this.majorSubstationTargets, '#d6e4ff', 1);
+        if (this.labelOn.substations) {
+            this.substationTargets.forEach((targets, cls) => {
+                const major = MAJOR_CLASSES.includes(cls);
+                const need = major ? LABEL_ZOOM.majorSubstations : LABEL_ZOOM.substations;
+                if (zoom >= need && this.substationShown(cls, zoom)) {
+                    addPoints(targets, '#d6e4ff', major ? 1 : 3);
+                }
+            });
         }
-        if (this.layerOn.substations && zoom >= LABEL_ZOOM.substations) {
-            addPoints(this.minorSubstationTargets, '#d6e4ff', 3);
-        }
-        if (zoom >= LABEL_ZOOM.majorLines) {
+        if (this.labelOn.lines && zoom >= LABEL_ZOOM.majorLines) {
             const cx = (view.w + view.e) / 2;
             const cy = (view.s + view.n) / 2;
             for (const item of this.lineIndex) {
                 if (!item.label || !this.classShown(item.cls, zoom)) {
                     continue;
                 }
-                const major = item.cls === 'hvdc' || item.kv >= 200;
+                const major = MAJOR_CLASSES.includes(item.cls);
                 const need = major
                     ? LABEL_ZOOM.majorLines
                     : item.kv >= 100
@@ -407,79 +507,94 @@ export class GridOverlay {
                     continue;
                 }
                 if (item.mid === undefined) {
-                    item.mid = midPoint(item.feature) ?? [];
+                    item.mid = midAnchor(item.feature);
                 }
                 // Label the middle of the line; if that is off screen, the on-screen
                 // corner of the line nearest the centre of the view.
-                let at: number[] | null = item.mid.length && inView(item.mid[1], item.mid[0]) ? item.mid : null;
-                if (!at) {
+                let anchor: LineAnchor | null = null;
+                if (item.mid) {
+                    const m = anchorPoint(item.mid);
+                    if (inView(m[1], m[0])) {
+                        anchor = item.mid;
+                    }
+                }
+                if (!anchor) {
                     let best = Infinity;
                     for (const part of lineParts(item.feature)) {
-                        for (const c of part) {
+                        for (let i = 0; i < part.length; i++) {
+                            const c = part[i];
                             const d = Math.hypot(c[0] - cx, c[1] - cy);
                             if (d < best && inView(c[1], c[0])) {
                                 best = d;
-                                at = c;
+                                anchor = { part, i, t: 0 };
                             }
                         }
                     }
                 }
-                if (at) {
-                    candidates.push({
-                        lat: at[1],
-                        lng: at[0],
-                        text: item.label,
-                        color: VOLTAGE_BY_ID[item.cls].color,
-                        offset: null,
-                        order: (major ? 2 : 4) * 1e6 - item.kv,
+                if (!anchor) {
+                    continue;
+                }
+                const at = anchorPoint(anchor);
+                const width = item.label.length * LABEL_CHAR_PX + 4;
+                const angle = anchorAngle(anchor, scale, width / 2);
+                const rad = (angle * Math.PI) / 180;
+                // Centre of the text: lifted off the line, at right angles to it.
+                const mx = at[0] * scale + Math.sin(rad) * LINE_LABEL_LIFT_PX;
+                const my = -mercatorY(at[1]) * scale - Math.cos(rad) * LINE_LABEL_LIFT_PX;
+                // A slanted label is covered by a run of small squares along its length.
+                const rects: Rect[] = [];
+                const steps = Math.ceil(width / 2 / lineHeight);
+                for (let k = -steps; k <= steps; k++) {
+                    rects.push({
+                        x: mx + Math.cos(rad) * k * lineHeight - lineHeight / 2,
+                        y: my + Math.sin(rad) * k * lineHeight - lineHeight / 2,
+                        w: lineHeight,
+                        h: lineHeight,
                     });
                 }
+                candidates.push({
+                    lat: at[1],
+                    lng: at[0],
+                    key: item.label,
+                    html:
+                        `<div style="${baseStyle};color:${VOLTAGE_BY_ID[item.cls].color};` +
+                        `transform:translate(-50%,-50%) rotate(${angle.toFixed(1)}deg) ` +
+                        `translateY(-${LINE_LABEL_LIFT_PX}px)">${esc(item.label)}</div>`,
+                    rects,
+                    order: (major ? 2 : 4) * 1e6 - item.kv,
+                });
             }
         }
 
         candidates.sort((a, b) => a.order - b.order);
-        const placed: { x: number; y: number; w: number; h: number }[] = [];
+        const taken: Rect[] = [];
         const seen = new Set<string>();
         const group = new this.L.FeatureGroup();
-        const height = LABEL_FONT_PX + 5;
+        let count = 0;
         for (const c of candidates) {
-            if (placed.length >= MAX_LABELS) {
+            if (count >= MAX_LABELS) {
                 break;
             }
-            if (seen.has(c.text)) {
+            if (seen.has(c.key)) {
                 continue; // parallel circuits share a name; one label is enough
             }
-            const width = c.text.length * LABEL_FONT_PX * 0.58 + 6;
-            const ax = c.lng * scale;
-            const ay = -mercatorY(c.lat) * scale;
-            const box = {
-                x: c.offset === null ? ax - width / 2 : ax + c.offset,
-                y: ay - height / 2,
-                w: width,
-                h: height,
-            };
-            const clash = placed.some(
-                p => box.x < p.x + p.w && p.x < box.x + box.w && box.y < p.y + p.h && p.y < box.y + box.h,
+            const clash = c.rects.some(r =>
+                taken.some(p => r.x < p.x + p.w && p.x < r.x + r.w && r.y < p.y + p.h && p.y < r.y + r.h),
             );
             if (clash) {
                 continue;
             }
-            placed.push(box);
-            seen.add(c.text);
-            const position =
-                c.offset === null
-                    ? 'transform:translate(-50%,-50%)'
-                    : `left:${c.offset.toFixed(0)}px;transform:translateY(-50%)`;
-            const icon = this.makeDivIcon(
-                `<div style="position:absolute;${position};white-space:nowrap;pointer-events:none;` +
-                    `font:600 ${LABEL_FONT_PX}px/1.2 sans-serif;color:${c.color};` +
-                    `text-shadow:0 0 2px #000,0 0 3px #000,0 0 4px #000,0 0 5px #000">${esc(c.text)}</div>`,
-            );
+            taken.push(...c.rects);
+            seen.add(c.key);
+            count++;
             group.addLayer(
-                new this.L.Marker({ lat: c.lat, lng: c.lng }, { icon, interactive: false, keyboard: false }),
+                new this.L.Marker(
+                    { lat: c.lat, lng: c.lng },
+                    { icon: this.makeDivIcon(c.html), interactive: false, keyboard: false },
+                ),
             );
         }
-        if (placed.length) {
+        if (count) {
             this.labelLayer = group;
             this.map.addLayer(group);
         }
@@ -508,12 +623,11 @@ export class GridOverlay {
         if (this.layerOn.generators) {
             consider(this.generatorTargets);
         }
-        if (this.layerOn.substations && zoom >= MAJOR_SUBSTATION_MIN_ZOOM) {
-            consider(this.majorSubstationTargets);
-        }
-        if (this.layerOn.substations && zoom >= SUBSTATION_MIN_ZOOM) {
-            consider(this.minorSubstationTargets);
-        }
+        this.substationTargets.forEach((targets, cls) => {
+            if (this.substationShown(cls, zoom)) {
+                consider(targets);
+            }
+        });
         if (bestPoint) {
             const { target } = bestPoint as { d: number; target: PointTarget };
             target.open({ lat: target.lat, lng: target.lng });
@@ -600,8 +714,9 @@ export class GridOverlay {
         this.lineLayers.forEach(layers => layers.forEach(l => this.removeLayer(l)));
         this.lineLayers.clear();
         this.lineIndex = [];
-        this.substationLayers.forEach(s => this.removeLayer(s.layer));
-        this.substationLayers = [];
+        this.substationLayers.forEach(layer => this.removeLayer(layer));
+        this.substationLayers.clear();
+        this.substationTargets.clear();
         [this.generatorLayer, this.flowLayer, this.labelLayer].forEach(l => this.removeLayer(l));
         this.generatorLayer = this.flowLayer = this.labelLayer = null;
         try {
@@ -662,57 +777,65 @@ export class GridOverlay {
     }
 
     private buildSubstations(): void {
-        this.substationLayers.forEach(s => this.removeLayer(s.layer));
-        this.substationLayers = [];
+        this.substationLayers.forEach(layer => this.removeLayer(layer));
+        this.substationLayers.clear();
+        this.substationTargets.clear();
         if (!this.ga) {
             return;
         }
-        this.majorSubstationTargets = [];
-        this.minorSubstationTargets = [];
-        const major = new this.L.FeatureGroup();
-        const minor = new this.L.FeatureGroup();
         for (const f of this.ga.substations) {
             const at = pointLatLng(f);
             if (!at) {
                 continue;
             }
-            const kv = num(prop(f.properties, 'VOLTAGEKV', 'CAPACITYKV', 'VOLTAGE_KV', 'VOLTAGE'));
+            const kv = num(prop(f.properties, 'VOLTAGE_KV', 'VOLTAGEKV', 'CAPACITY_KV', 'CAPACITYKV'));
+            // A substation with no recorded voltage falls in the lowest class.
             const cls = classifyVoltage(kv);
-            const isMajor = kv !== null && kv >= 200;
+            const isMajor = MAJOR_CLASSES.includes(cls);
             const live = isOperational(f);
+            const radius = isMajor ? 4.5 : 3.5;
             const marker = new this.L.CircleMarker(at, {
                 interactive: false,
-                radius: isMajor ? 4.5 : 3.5,
+                radius,
                 color: kv ? VOLTAGE_BY_ID[cls].color : '#333',
                 weight: isMajor ? 2 : 1.5,
                 opacity: live ? 1 : 0.5,
                 fillColor: '#ffffff',
                 fillOpacity: live ? 1 : 0.5,
             });
-            const subName = shorten(String(prop(f.properties, ...NAME_FIELDS) ?? ''));
-            const subLabel = subName && subName !== 'Unknown' ? `${subName}${kv ? ` · ${kv} kV` : ''}` : '';
-            this.pointTarget(isMajor ? this.majorSubstationTargets : this.minorSubstationTargets, at, isMajor ? 4.5 : 3.5, subLabel, kv ?? 0, latlng => {
-                this.openFacilityCode = null;
-                const subtype = String(prop(f.properties, 'FEATURE_SUBTYPE') ?? '');
-                const kind = subtype && subtype !== 'Substation' ? `${subtype} substation` : 'Substation';
-                this.openPopup(
-                    latlng,
-                    popupHtml(
-                        String(prop(f.properties, ...NAME_FIELDS) ?? 'Substation'),
-                        swatch(kv ? VOLTAGE_BY_ID[cls].color : '#fff') +
-                            esc([kind, kv ? `${kv} kV` : ''].filter(Boolean).join(' · ')) +
-                            this.statusNote(f),
-                        propsRows(f.properties, [...NAME_FIELDS, 'FEATURE_SUBTYPE']),
-                        GA_CREDIT,
-                    ),
-                );
-            });
-            (isMajor ? major : minor).addLayer(marker);
+            if (!this.substationLayers.has(cls)) {
+                this.substationLayers.set(cls, new this.L.FeatureGroup());
+                this.substationTargets.set(cls, []);
+            }
+            this.substationLayers.get(cls).addLayer(marker);
+
+            const name = shorten(String(prop(f.properties, ...NAME_FIELDS) ?? ''));
+            this.pointTarget(
+                this.substationTargets.get(cls) as PointTarget[],
+                at,
+                radius,
+                name && name !== 'Unknown' ? name : '',
+                kv ? `${kv} kV` : '',
+                kv ?? 0,
+                latlng => {
+                    this.openFacilityCode = null;
+                    const subtype = String(prop(f.properties, 'FEATURE_SUBTYPE') ?? '');
+                    const kind =
+                        subtype && subtype !== 'Substation' ? `${subtype} substation` : 'Substation';
+                    this.openPopup(
+                        latlng,
+                        popupHtml(
+                            String(prop(f.properties, ...NAME_FIELDS) ?? 'Substation'),
+                            swatch(kv ? VOLTAGE_BY_ID[cls].color : '#fff') +
+                                esc([kind, kv ? `${kv} kV` : ''].filter(Boolean).join(' · ')) +
+                                this.statusNote(f),
+                            propsRows(f.properties, [...NAME_FIELDS, 'FEATURE_SUBTYPE']),
+                            GA_CREDIT,
+                        ),
+                    );
+                },
+            );
         }
-        this.substationLayers = [
-            { layer: minor, minZoom: SUBSTATION_MIN_ZOOM },
-            { layer: major, minZoom: MAJOR_SUBSTATION_MIN_ZOOM },
-        ];
     }
 
     /** GA stations not already covered by an Open Electricity facility at the same site. */
@@ -761,9 +884,7 @@ export class GridOverlay {
                 fillColor: FUEL_STYLES[fuel].color,
                 fillOpacity: isOperational(f) ? 0.85 : 0.3,
             });
-            const stationName = shorten(String(prop(p, ...NAME_FIELDS) ?? ''));
-            const stationLabel = stationName ? `${stationName}${mw ? ` · ${fmtMW(mw)}` : ''}` : '';
-            this.pointTarget(this.generatorTargets, at, capacityRadius(mw), stationLabel, mw ?? 0, latlng => {
+            this.pointTarget(this.generatorTargets, at, capacityRadius(mw), shorten(String(prop(p, ...NAME_FIELDS) ?? '')), mw ? fmtMW(mw) : '', mw ?? 0, latlng => {
                 this.openFacilityCode = null;
                 this.openPopup(
                     latlng,
@@ -799,7 +920,7 @@ export class GridOverlay {
                         : 0.85,
                 },
             );
-            this.pointTarget(this.generatorTargets, { lat: f.lat, lng: f.lng }, capacityRadius(f.capacity), `${shorten(f.name)}${f.capacity ? ` · ${fmtMW(f.capacity)}` : ''}`, f.capacity, latlng => {
+            this.pointTarget(this.generatorTargets, { lat: f.lat, lng: f.lng }, capacityRadius(f.capacity), shorten(f.name), f.capacity ? fmtMW(f.capacity) : '', f.capacity, latlng => {
                 this.openFacilityCode = f.code;
                 const fresh = f.units.some(u => this.readings.has(u.code));
                 this.openPopup(latlng, this.facilityHtml(f, !fresh));
@@ -900,6 +1021,13 @@ export class GridOverlay {
 
     // ---------- Leaflet helpers ----------
 
+    /** Substations follow their own layer switch, their voltage's tick box and the zoom. */
+    private substationShown(cls: VoltageClass, zoom: number): boolean {
+        return (
+            this.layerOn.substations && !!this.classOn.get(cls) && zoom >= substationMinZoom(cls)
+        );
+    }
+
     private classShown(id: VoltageClass, zoom: number): boolean {
         return this.layerOn.lines && !!this.classOn.get(id) && zoom >= VOLTAGE_BY_ID[id].minZoom;
     }
@@ -926,10 +1054,11 @@ export class GridOverlay {
         at: { lat: number; lng: number },
         radius: number,
         label: string,
+        detail: string,
         weight: number,
         open: (latlng: { lat: number; lng: number }) => void,
     ): void {
-        list.push({ lat: at.lat, lng: at.lng, radius, label, weight, open });
+        list.push({ lat: at.lat, lng: at.lng, radius, label, detail, weight, open });
     }
 
     private badge(lat: number, lng: number, html: string, bg: string, fg: string): any {
