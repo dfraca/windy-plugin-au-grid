@@ -1,4 +1,4 @@
-// Downloads the Geoscience Australia "National Electricity Infrastructure" layers and writes a
+// Downloads the Geoscience Australia "Electricity Infrastructure" layers and writes a
 // compact snapshot to data/grid.json. The plugin loads that snapshot (GitHub serves it with
 // permissive cross-origin headers; the GA service itself cannot be fetched from windy.com).
 //
@@ -7,15 +7,23 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 
 const SERVICE =
-    'https://services.ga.gov.au/gis/rest/services/National_Electricity_Infrastructure/MapServer';
+    process.env.GRID_SERVICE ||
+    'https://services.ga.gov.au/gis/rest/services/Electricity_Infrastructure/MapServer';
 const OUT_DIR = process.env.GRID_OUT_DIR || 'data';
 const PAGE_SIZE = 2000;
 const MAX_PAGES = 30;
-const DROP_FIELDS = /^(objectid|fid|shape.*|ga_guid|globalid|featuretype|st_length.*|se_anno.*)$/i;
+const DROP_FIELDS =
+    /^(objectid|fid|shape.*|ga_guid|globalid|featuretype|st_length.*|se_anno.*|created_date|last_edited_on|supplied_feature_edits)$/i;
 
 async function getJson(url, attempt = 1) {
     try {
-        const res = await fetch(url, { headers: { 'User-Agent': 'windy-plugin-au-grid data fetch' } });
+        const res = await fetch(url, {
+            headers: {
+                'User-Agent':
+                    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36',
+                Accept: 'application/json,*/*',
+            },
+        });
         if (!res.ok) {
             throw new Error(`HTTP ${res.status}`);
         }
@@ -101,27 +109,23 @@ async function fetchLayer(layerId, simplifyDeg) {
     return out;
 }
 
-function tally(features, key) {
-    const counts = {};
+function describe(label, features) {
+    const values = new Map();
     for (const f of features) {
-        const found = Object.keys(f.properties).find(k => k.toLowerCase() === key.toLowerCase());
-        const v = found === undefined ? '(missing)' : String(f.properties[found]);
-        counts[v] = (counts[v] ?? 0) + 1;
+        for (const [k, v] of Object.entries(f.properties)) {
+            if (!values.has(k)) values.set(k, new Map());
+            const m = values.get(k);
+            m.set(String(v), (m.get(String(v)) ?? 0) + 1);
+        }
     }
-    return Object.entries(counts)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 40)
-        .map(([v, n]) => `${v}: ${n}`)
-        .join(', ');
-}
-
-function describe(label, features, tallies) {
-    const keys = new Set();
-    features.forEach(f => Object.keys(f.properties).forEach(k => keys.add(k)));
     console.log(`\n${label}: ${features.length} features`);
-    console.log(`  fields: ${[...keys].join(', ')}`);
-    for (const key of tallies) console.log(`  ${key} -> ${tally(features, key)}`);
-    if (features[0]) console.log(`  sample: ${JSON.stringify(features[0].properties)}`);
+    for (const [k, m] of values) {
+        const filled = [...m.values()].reduce((a, b) => a + b, 0);
+        const top = [...m.entries()].sort((a, b) => b[1] - a[1]);
+        const shown = top.slice(0, m.size <= 45 ? 45 : 6).map(([v, n]) => `${v.slice(0, 50)}: ${n}`);
+        console.log(`  ${k} [${filled} filled, ${m.size} distinct] ${shown.join(' | ')}${m.size > shown.length ? ' | ...' : ''}`);
+    }
+    if (features[0]) console.log(`  sample: ${JSON.stringify(features[0])}`.slice(0, 700));
 }
 
 console.log('Discovering layers...');
@@ -133,11 +137,14 @@ const lines = await fetchLayer(ids.lines, 0.0005);
 const substations = await fetchLayer(ids.substations, null);
 const stations = await fetchLayer(ids.stations, null);
 
-describe('Lines', lines, ['CAPACITYKV', 'OPERATIONALSTATUS', 'CLASS', 'STATE']);
-const dc = lines.filter(f => /basslink|murraylink|directlink|terranora|marinus|hvdc|\bdc (link|cable|line)\b/i.test(JSON.stringify(f.properties)));
-console.log(`  HVDC name matches: ${dc.length} -> ${[...new Set(dc.map(f => f.properties.NAME ?? f.properties.name))].join(' | ')}`);
-describe('Substations', substations, ['VOLTAGEKV', 'OPERATIONALSTATUS', 'CLASS', 'STATE']);
-describe('Power stations', stations, ['PRIMARYFUELTYPE', 'OPERATIONALSTATUS', 'STATE']);
+describe('Lines', lines);
+const dc = lines.filter(f =>
+    /basslink|murraylink|directlink|terranora|marinus|hvdc|\bdc\b|direct current/i.test(JSON.stringify(f.properties)),
+);
+console.log(`  possible HVDC matches: ${dc.length}`);
+for (const f of dc.slice(0, 40)) console.log(`    ${JSON.stringify(f.properties)}`.slice(0, 400));
+describe('Substations', substations);
+describe('Power stations', stations);
 
 if (lines.length < 100 || stations.length < 50) {
     throw new Error('Suspiciously little data returned; not writing a snapshot.');

@@ -14,16 +14,12 @@ jobs:
             - uses: actions/checkout@v7
             - name: Cross-origin check (informational)
               run: |
-                  echo "== Geoscience Australia, as seen from windy.com =="
-                  curl -sS -m 60 -D - -o /dev/null -H 'Origin: https://www.windy.com' \
-                    'https://services.ga.gov.au/gis/rest/services/National_Electricity_Infrastructure/MapServer?f=json' | tr -d '\r' | head -25 || true
-                  echo "== Open Electricity preflight, as seen from windy.com =="
-                  curl -sS -m 60 -D - -o /dev/null -X OPTIONS -H 'Origin: https://www.windy.com' \
-                    -H 'Access-Control-Request-Method: GET' -H 'Access-Control-Request-Headers: authorization' \
-                    'https://api.openelectricity.org.au/v4/facilities/' | tr -d '\r' | head -25 || true
-                  echo "== Open Electricity GET without key =="
-                  curl -sS -m 60 -D - -o /dev/null -H 'Origin: https://www.windy.com' \
-                    'https://api.openelectricity.org.au/v4/facilities/' | tr -d '\r' | head -25 || true
+                  U='https://services.ga.gov.au/gis/rest/services/Electricity_Infrastructure/MapServer?f=json'
+                  echo "== GA service, plain curl =="
+                  curl -sS -m 60 -D - -o /dev/null "$U" | tr -d '\r' | head -12 || true
+                  echo "== GA service, browser user agent, Origin windy.com =="
+                  curl -sS -m 60 -D - -o /dev/null -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36' \
+                    -H 'Origin: https://www.windy.com' "$U" | tr -d '\r' | head -20 || true
             - name: Fetch grid data
               run: node scripts/fetch-grid-data.mjs
             - name: Commit snapshot
