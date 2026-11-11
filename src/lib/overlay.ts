@@ -48,12 +48,8 @@ function pointLatLng(f: Feature): { lat: number; lng: number } | null {
     return { lat: c[1], lng: c[0] };
 }
 
-function capacityRadius(mw: number | null): number {
-    if (!mw || mw <= 0) {
-        return 4;
-    }
-    return Math.max(4, Math.min(14, 3 + Math.sqrt(mw) / 3.2));
-}
+/** Power stations are small, uniform dots: the label carries the name and size. */
+const STATION_RADIUS = 3.5;
 
 interface PointTarget {
     lat: number;
@@ -877,14 +873,14 @@ export class GridOverlay {
             const mw = num(prop(p, 'GENERATION_CAPACITY_MW', 'GENERATIONMW', 'CAPACITY_MW'));
             const marker = new this.L.CircleMarker(at, {
                 interactive: false,
-                radius: capacityRadius(mw),
+                radius: STATION_RADIUS,
                 color: '#ffffff',
                 weight: 1,
                 opacity: isOperational(f) ? 0.9 : 0.4,
                 fillColor: FUEL_STYLES[fuel].color,
                 fillOpacity: isOperational(f) ? 0.85 : 0.3,
             });
-            this.pointTarget(this.generatorTargets, at, capacityRadius(mw), shorten(String(prop(p, ...NAME_FIELDS) ?? '')), mw ? fmtMW(mw) : '', mw ?? 0, latlng => {
+            this.pointTarget(this.generatorTargets, at, STATION_RADIUS, shorten(String(prop(p, ...NAME_FIELDS) ?? '')), mw ? fmtMW(mw) : '', mw ?? 0, latlng => {
                 this.openFacilityCode = null;
                 this.openPopup(
                     latlng,
@@ -909,7 +905,7 @@ export class GridOverlay {
                 { lat: f.lat, lng: f.lng },
                 {
                     interactive: false,
-                    radius: capacityRadius(f.capacity),
+                    radius: STATION_RADIUS,
                     // A bright ring marks stations that are generating right now.
                     color: live && (output as number) > 1 ? '#00ff9c' : '#ffffff',
                     weight: live && (output as number) > 1 ? 2.5 : 1,
@@ -920,7 +916,7 @@ export class GridOverlay {
                         : 0.85,
                 },
             );
-            this.pointTarget(this.generatorTargets, { lat: f.lat, lng: f.lng }, capacityRadius(f.capacity), shorten(f.name), f.capacity ? fmtMW(f.capacity) : '', f.capacity, latlng => {
+            this.pointTarget(this.generatorTargets, { lat: f.lat, lng: f.lng }, STATION_RADIUS, shorten(f.name), f.capacity ? fmtMW(f.capacity) : '', f.capacity, latlng => {
                 this.openFacilityCode = f.code;
                 const fresh = f.units.some(u => this.readings.has(u.code));
                 this.openPopup(latlng, this.facilityHtml(f, !fresh));

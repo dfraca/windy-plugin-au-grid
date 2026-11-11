@@ -1,8 +1,11 @@
 name: update-grid-data
 
-# Refreshes data/grid.json from Geoscience Australia. Run it manually from the Actions tab.
+# Refreshes data/grid.json from Geoscience Australia: weekly, and on demand from the Actions tab.
 on:
     workflow_dispatch:
+    schedule:
+        # Sundays 16:23 UTC = early Monday morning in Sydney.
+        - cron: '23 16 * * 0'
 
 permissions:
     contents: write

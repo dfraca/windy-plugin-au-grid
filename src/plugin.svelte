@@ -136,7 +136,6 @@
                 </span>
             {/each}
         </div>
-        <p class="hint">Circle size shows capacity.</p>
 
         {#if LIVE_DATA_ENABLED}
         <h4>Live data</h4>
@@ -181,7 +180,7 @@
         <p class="credit">
             Network data: © Commonwealth of Australia (Geoscience Australia), CC BY 4.0{snapshotDate
                 ? `, copied ${snapshotDate}`
-                : ''}. Locations are indicative. Not for operational use.
+                : ''}. Locations are indicative.
         </p>
     </section>
 {/if}

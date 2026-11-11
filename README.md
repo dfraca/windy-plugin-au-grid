@@ -4,8 +4,8 @@ Australian power grid overlay for Windy.com.
 
 - **Power lines** coloured by voltage: 500 kV yellow, 330 kV orange, 275 kV purple,
   220 kV blue, 110–132 kV red, HVDC links green, anything lower grey.
-- **Substations** (ringed in their voltage colour) and **power stations** (coloured by fuel,
-  sized by capacity).
+- **Substations** (ringed in their voltage colour) and **power stations** (small dots coloured
+  by fuel).
 - **Tap or click anything** for its details.
 - Lines under 220 kV appear from zoom 6; lines under 110 kV and smaller substations from zoom 8.
 - **Name labels** appear as you zoom in: large power stations first, then all stations, then
@@ -44,7 +44,10 @@ The plugin does not query that service on every load. `scripts/fetch-grid-data.m
 three layers into `data/grid.json`, and the plugin downloads that one file from GitHub. If the
 file cannot be reached it falls back to the GA service.
 
-To refresh the copy: Actions tab → `update-grid-data` → Run workflow. No republish is needed.
+The copy refreshes itself every Monday morning (Sydney time) through the `update-grid-data`
+workflow, so changes Geoscience Australia makes, such as a line moving from "Under Construction"
+to "Operational", reach the plugin within a week. To refresh sooner: Actions tab →
+`update-grid-data` → Run workflow. No republish is needed.
 
 HVDC links are identified by name, because the data has no AC/DC field: Basslink
 ("Basslink-Loy Yang to Basslink-George Town"), Murraylink ("Monash to Red Cliffs Terminal") and
@@ -70,4 +73,3 @@ on each interconnector between NEM regions, plus regional price and demand.
 ## Limits
 
 - Locations are indicative; each feature carries GA's own 1–5 location-confidence rating.
-- Not for operational or safety use.
