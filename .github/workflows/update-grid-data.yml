@@ -1,0 +1,39 @@
+name: update-grid-data
+
+# Refreshes data/grid.json from Geoscience Australia. Run it manually from the Actions tab.
+on:
+    workflow_dispatch:
+
+permissions:
+    contents: write
+
+jobs:
+    update-grid-data:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+            - name: Cross-origin check (informational)
+              run: |
+                  echo "== Geoscience Australia, as seen from windy.com =="
+                  curl -sS -m 60 -D - -o /dev/null -H 'Origin: https://www.windy.com' \
+                    'https://services.ga.gov.au/gis/rest/services/National_Electricity_Infrastructure/MapServer?f=json' | tr -d '\r' | head -25 || true
+                  echo "== Open Electricity preflight, as seen from windy.com =="
+                  curl -sS -m 60 -D - -o /dev/null -X OPTIONS -H 'Origin: https://www.windy.com' \
+                    -H 'Access-Control-Request-Method: GET' -H 'Access-Control-Request-Headers: authorization' \
+                    'https://api.openelectricity.org.au/v4/facilities/' | tr -d '\r' | head -25 || true
+                  echo "== Open Electricity GET without key =="
+                  curl -sS -m 60 -D - -o /dev/null -H 'Origin: https://www.windy.com' \
+                    'https://api.openelectricity.org.au/v4/facilities/' | tr -d '\r' | head -25 || true
+            - name: Fetch grid data
+              run: node scripts/fetch-grid-data.mjs
+            - name: Commit snapshot
+              run: |
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                  git add data/grid.json
+                  if git diff --cached --quiet; then
+                    echo "No change in grid data."
+                  else
+                    git commit -m "Update grid data snapshot from Geoscience Australia"
+                    git push
+                  fi
