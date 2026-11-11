@@ -179,7 +179,7 @@
 
         <p class="credit">
             Network data: © Commonwealth of Australia (Geoscience Australia), CC BY 4.0{snapshotDate
-                ? `, copied ${snapshotDate}`
+                ? `, last updated ${snapshotDate}`
                 : ''}. Locations are indicative.
         </p>
     </section>
@@ -212,6 +212,7 @@
     // Fingers are less precise than a mouse pointer.
     const TAP_TOLERANCE_PX = isMobileOrTablet ? 18 : 8;
     const STORAGE_KEY = 'windy-plugin-au-grid:oe-key';
+    const SETTINGS_KEY = 'windy-plugin-au-grid:settings';
     const MAX_LIVE_FACILITIES = 90;
     const REFRESH_MS = 5 * 60 * 1000;
 
@@ -249,10 +250,54 @@
         flows: true,
     };
     let labelShow: Record<LabelKind, boolean> = { lines: true, substations: true, stations: true };
+
+    /** Copies saved true/false values over the defaults, ignoring anything unrecognised. */
+    function restore<K extends string>(target: Record<K, boolean>, saved: unknown): void {
+        if (!saved || typeof saved !== 'object') {
+            return;
+        }
+        for (const key of Object.keys(target) as K[]) {
+            const value = (saved as Record<string, unknown>)[key];
+            if (typeof value === 'boolean') {
+                target[key] = value;
+            }
+        }
+    }
+
+    /** The tick boxes are remembered in this browser, so the plugin reopens as it was left. */
+    function loadSettings(): void {
+        try {
+            const raw = window.localStorage.getItem(SETTINGS_KEY);
+            if (!raw) {
+                return;
+            }
+            const saved = JSON.parse(raw);
+            restore(show, saved?.layers);
+            restore(classOn, saved?.voltages);
+            restore(labelShow, saved?.labels);
+        } catch (e) {
+            // No storage, or an unreadable value: carry on with the defaults.
+        }
+    }
+
+    function saveSettings(): void {
+        try {
+            window.localStorage.setItem(
+                SETTINGS_KEY,
+                JSON.stringify({ layers: show, voltages: classOn, labels: labelShow }),
+            );
+        } catch (e) {
+            // Storage can be unavailable (private mode); settings then last for this session.
+        }
+    }
+
     let classOn = Object.fromEntries(VOLTAGE_STYLES.map(s => [s.id, true])) as Record<
         VoltageClass,
         boolean
     >;
+
+    // Must run after show, labelShow and classOn exist.
+    loadSettings();
 
     let apiKey = '';
     let connected = false;
@@ -289,18 +334,21 @@
         show[id] = !show[id];
         show = show;
         overlay?.setLayerVisible(id, show[id]);
+        saveSettings();
     }
 
     function toggleLabel(id: LabelKind): void {
         labelShow[id] = !labelShow[id];
         labelShow = labelShow;
         overlay?.setLabelVisible(id, labelShow[id]);
+        saveSettings();
     }
 
     function toggleClass(id: VoltageClass): void {
         classOn[id] = !classOn[id];
         classOn = classOn;
         overlay?.setClassVisible(id, classOn[id]);
+        saveSettings();
     }
 
     /**
@@ -509,6 +557,12 @@
         overlay = new GridOverlay(leaflet, map);
         for (const chip of allLayerChips) {
             overlay.setLayerVisible(chip.id, show[chip.id]);
+        }
+        for (const item of legend) {
+            overlay.setClassVisible(item.id, classOn[item.id]);
+        }
+        for (const chip of labelChips) {
+            overlay.setLabelVisible(chip.id, labelShow[chip.id]);
         }
         overlay.onFacilityClick = facility => {
             void loadFacilityLive(facility);
