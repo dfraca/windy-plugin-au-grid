@@ -240,10 +240,12 @@
     let warnings: string[] = [];
     let snapshotDate: string | null = null;
 
+    // What is switched on when the plugin opens: lines only. Substations and power
+    // stations start off and are one tick away.
     let show: Record<LayerId, boolean> = {
         lines: true,
-        substations: true,
-        generators: true,
+        substations: false,
+        generators: false,
         flows: true,
     };
     let labelShow: Record<LabelKind, boolean> = { lines: true, substations: true, stations: true };
@@ -505,6 +507,9 @@
             return;
         }
         overlay = new GridOverlay(leaflet, map);
+        for (const chip of allLayerChips) {
+            overlay.setLayerVisible(chip.id, show[chip.id]);
+        }
         overlay.onFacilityClick = facility => {
             void loadFacilityLive(facility);
         };
